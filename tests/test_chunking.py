@@ -63,11 +63,11 @@ def test_no_headings_uses_recursive_split(sample_vault_path: Path):
     text = (sample_vault_path / "no-headings.md").read_text()
     # Strip frontmatter manually for this test — or use chunk_document
     # Use chunk_by_headings with the body (no headings)
-    body = """This is a note without any headings. It contains multiple paragraphs of text.
+    body = """This is a note without any headings. It contains multiple paragraphs of text that should be chunked using the recursive text splitter since there are no heading boundaries to split on.
 
-Second paragraph with more content. This tests the fallback behavior.
+Second paragraph with more content. This tests the fallback behavior when no markdown headings are present in the document.
 
-Third paragraph ensures we have enough content.
+Third paragraph ensures we have enough content to potentially trigger splitting if the chunk_max_tokens is set low enough for testing purposes here.
 """
     chunks = chunk_by_headings(body, chunk_max_tokens=512, chunk_overlap=0)
     assert len(chunks) >= 1
@@ -131,15 +131,18 @@ def test_code_block_exceeding_max_is_split():
 
 def test_fixed_window_strategy(sample_vault_path: Path, tmp_path: Path):
     """chunk_document with strategy='fixed' splits entire document with overlap."""
-    # Create a doc with enough content to produce multiple chunks at low token limit
-    content = "\n\n".join([f"Paragraph {i}: " + "word " * 20 for i in range(10)])
+    # Create a doc with enough content to produce multiple chunks.
+    # Each paragraph is ~300 chars so chunks exceed MIN_CHUNK_CHARS; use chunk_max_tokens=100
+    # so two paragraphs together (~600 chars = ~150 tokens) exceeds the limit.
+    para = "word " * 60  # ~300 chars, ~75 tokens
+    content = "\n\n".join([f"Paragraph {i}: {para}" for i in range(5)])
     doc = tmp_path / "test-fixed.md"
     doc.write_text(content)
 
     metadata, chunks = chunk_document(
         file_path=doc,
         chunk_strategy="fixed",
-        chunk_max_tokens=50,
+        chunk_max_tokens=100,
         chunk_overlap=10,
         include_frontmatter="ignore",
     )
@@ -195,19 +198,22 @@ def test_frontmatter_ignore(sample_vault_path: Path):
 # test_malformed_frontmatter_logs_warning
 # ---------------------------------------------------------------------------
 
-def test_malformed_frontmatter_logs_warning(sample_vault_path: Path, capfd):
+def test_malformed_frontmatter_logs_warning(sample_vault_path: Path, caplog):
     """Malformed YAML logs warning to stderr and returns empty metadata with full file text."""
     import logging
 
     file = sample_vault_path / "malformed-frontmatter.md"
 
-    # Capture log output — warning goes to stderr via logging
-    with pytest.warns(None):  # ensure no pytest warnings obscure our check
+    with caplog.at_level(logging.WARNING, logger="obsidian_rag.markdown_parser"):
         metadata, body = parse_frontmatter(file, include_frontmatter="metadata_only")
 
     assert metadata == {}, f"Expected empty metadata for malformed frontmatter, got: {metadata}"
     # Content should still be returned
-    assert "Valid Content" in body or "Valid Content" in body
+    assert "Valid Content" in body
+    # Warning should have been logged
+    assert any("Malformed" in record.message or "malformed" in record.message.lower() for record in caplog.records), (
+        f"Expected malformed frontmatter warning in logs, got: {[r.message for r in caplog.records]}"
+    )
 
 
 # ---------------------------------------------------------------------------
