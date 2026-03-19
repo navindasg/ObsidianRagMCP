@@ -1,13 +1,23 @@
+"""Click CLI entry point for the ObsidianRAG MCP server."""
 import importlib.metadata
 import logging
+import sys
 
 import click
 
 from obsidian_rag.config import load_config
+from obsidian_rag.server import run_server
+
+logger = logging.getLogger(__name__)
 
 
 @click.command()
-@click.option("--config", default="~/.obsidian-rag/config.yaml", help="Path to config file")
+@click.option(
+    "--config",
+    "config_path",
+    default="~/.obsidian-rag/config.yaml",
+    help="Path to config file",
+)
 @click.option("--vault-path", default=None, help="Override vault path")
 @click.option("--vault-name", default=None, help="Override vault name")
 @click.option("--ollama-url", default=None, help="Override Ollama API URL")
@@ -17,7 +27,7 @@ from obsidian_rag.config import load_config
     importlib.metadata.version("obsidian-rag"),
     prog_name="obsidian-rag",
 )
-def cli(config, vault_path, vault_name, ollama_url, verbose, debug):
+def cli(config_path, vault_path, vault_name, ollama_url, verbose, debug):
     """ObsidianRAG MCP server for Claude Desktop."""
     if debug:
         logging.getLogger().setLevel(logging.DEBUG)
@@ -25,12 +35,19 @@ def cli(config, vault_path, vault_name, ollama_url, verbose, debug):
         logging.getLogger().setLevel(logging.INFO)
 
     cfg = load_config(
-        config,
+        config_path,
         overrides={
             "vault_path": vault_path,
             "vault_name": vault_name,
             "ollama_url": ollama_url,
         },
     )
-    # Server startup deferred to plan 02
-    _ = cfg
+
+    vault_count = len(cfg.vaults)
+    version = importlib.metadata.version("obsidian-rag")
+    print(
+        f"obsidian-rag v{version} | {vault_count} vault{'s' if vault_count != 1 else ''} | starting...",
+        file=sys.stderr,
+    )
+
+    run_server(cfg)
