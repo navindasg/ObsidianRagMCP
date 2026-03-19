@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 import ollama as ollama_client
 from fastmcp import FastMCP
 
+from obsidian_rag.indexer import build_index
 from obsidian_rag.models import AppConfig
 
 logger = logging.getLogger(__name__)
@@ -52,8 +53,28 @@ def create_server(config: AppConfig) -> FastMCP:
             f"obsidian-rag v{version_str} | {vault_count} vault{'s' if vault_count != 1 else ''} | Ollama OK",
             file=sys.stderr,
         )
+
+        # Index each vault (blocks startup per CONTEXT.md decision)
+        vault_indexes = {}
+        for vault_cfg in config.vaults:
+            logger.info("Indexing vault: %s", vault_cfg.name)
+            index, metadata, file_hashes = build_index(config, vault_cfg)
+            vault_indexes[vault_cfg.name] = {
+                "index": index,
+                "metadata": metadata,
+                "file_hashes": file_hashes,
+                "vault_config": vault_cfg,
+            }
+            chunk_count = index.ntotal if index is not None else 0
+            logger.info("Vault '%s' indexed: %d chunks", vault_cfg.name, chunk_count)
+
+        print(
+            f"Indexing complete | {sum(v['index'].ntotal for v in vault_indexes.values() if v['index'])} chunks",
+            file=sys.stderr,
+        )
+
         logger.info("Server started successfully")
-        yield {}
+        yield {"vault_indexes": vault_indexes, "config": config}
         logger.info("Server shutting down")
 
     mcp = FastMCP("obsidian-rag", lifespan=lifespan)

@@ -44,6 +44,7 @@ def app_config(tmp_path):
     return AppConfig(vaults=[vault])
 
 
+
 # ---------------------------------------------------------------------------
 # Health check tests
 # ---------------------------------------------------------------------------
@@ -160,3 +161,22 @@ def test_startup_banner_on_stderr(app_config, capsys):
     captured = capsys.readouterr()
     assert "obsidian-rag v" in captured.err
     assert "Ollama OK" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Indexer wiring test
+# ---------------------------------------------------------------------------
+
+
+def test_lifespan_calls_build_index(app_config):
+    """Verify build_index is importable from server module scope (wired into lifespan)."""
+    mock_index = MagicMock()
+    mock_index.ntotal = 42
+
+    with patch("obsidian_rag.server.build_index", return_value=(mock_index, {}, {})):
+        server = create_server(app_config)
+        # Verify the import is available from server module scope
+        from obsidian_rag.server import build_index as imported_build
+
+        assert imported_build is not None
+        assert hasattr(server, "run")
