@@ -2,6 +2,7 @@
 import importlib.metadata
 import logging
 import sys
+import threading
 from contextlib import asynccontextmanager
 
 import ollama as ollama_client
@@ -9,6 +10,8 @@ from fastmcp import FastMCP
 
 from obsidian_rag.indexer import build_index
 from obsidian_rag.models import AppConfig
+from obsidian_rag.tools import register_tools
+from obsidian_rag.watcher import VaultWatcher
 
 logger = logging.getLogger(__name__)
 
@@ -74,10 +77,19 @@ def create_server(config: AppConfig) -> FastMCP:
         )
 
         logger.info("Server started successfully")
-        yield {"vault_indexes": vault_indexes, "config": config}
-        logger.info("Server shutting down")
+
+        index_lock = threading.Lock()
+        watcher = VaultWatcher(vault_indexes, config, index_lock=index_lock)
+        watcher.start()  # no-op if watch_enabled=False
+
+        try:
+            yield {"vault_indexes": vault_indexes, "config": config, "index_lock": index_lock}
+        finally:
+            watcher.stop()
+            logger.info("Server shutting down")
 
     mcp = FastMCP("obsidian-rag", lifespan=lifespan)
+    register_tools(mcp, config)
     return mcp
 
 
