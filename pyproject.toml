@@ -13,6 +13,7 @@ dependencies = [
     "faiss-cpu>=1.7.4",
     "python-frontmatter>=1.1.0",
     "numpy>=2.4.3",
+    "watchdog>=6.0.0",
 ]
 
 [project.scripts]
