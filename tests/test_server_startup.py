@@ -180,3 +180,119 @@ def test_lifespan_calls_build_index(app_config):
 
         assert imported_build is not None
         assert hasattr(server, "run")
+
+
+# ---------------------------------------------------------------------------
+# Integration tests for server wiring (tools + watcher)
+# ---------------------------------------------------------------------------
+
+
+def test_create_server_registers_tools(app_config):
+    """create_server calls register_tools once with the mcp instance and config."""
+    with patch("obsidian_rag.server.register_tools") as mock_register:
+        server = create_server(app_config)
+        mock_register.assert_called_once()
+        call_args = mock_register.call_args
+        # First positional arg should be the FastMCP instance, second is config
+        assert call_args[0][0] is server
+        assert call_args[0][1] is app_config
+
+
+def test_lifespan_starts_watcher(app_config):
+    """Lifespan creates VaultWatcher and calls start() after indexing completes."""
+    import asyncio
+    import threading
+
+    mock_index = MagicMock()
+    mock_index.ntotal = 0
+
+    with (
+        patch("obsidian_rag.server.build_index", return_value=(mock_index, {}, {})),
+        patch("obsidian_rag.server._check_ollama_health"),
+        patch("obsidian_rag.server.VaultWatcher") as MockWatcher,
+        patch("obsidian_rag.server.register_tools"),
+    ):
+        mock_watcher_instance = MagicMock()
+        MockWatcher.return_value = mock_watcher_instance
+
+        server = create_server(app_config)
+
+        async def run():
+            # FastMCP stores custom lifespan result in _lifespan_result;
+            # use _lifespan_manager() to drive the custom lifespan coroutine.
+            async with server._lifespan_manager():
+                pass
+
+        asyncio.run(run())
+
+        MockWatcher.assert_called_once()
+        call_args = MockWatcher.call_args
+        # First arg: vault_indexes dict, second: config, keyword: index_lock
+        assert isinstance(call_args[0][0], dict)
+        assert call_args[0][1] is app_config
+        # threading.Lock() returns a _thread.lock; verify via hasattr duck-typing
+        lock_arg = call_args[1]["index_lock"]
+        assert hasattr(lock_arg, "acquire") and hasattr(lock_arg, "release")
+
+        mock_watcher_instance.start.assert_called_once()
+
+
+def test_lifespan_stops_watcher_on_shutdown(app_config):
+    """Lifespan calls watcher.stop() when context exits."""
+    import asyncio
+
+    mock_index = MagicMock()
+    mock_index.ntotal = 0
+
+    with (
+        patch("obsidian_rag.server.build_index", return_value=(mock_index, {}, {})),
+        patch("obsidian_rag.server._check_ollama_health"),
+        patch("obsidian_rag.server.VaultWatcher") as MockWatcher,
+        patch("obsidian_rag.server.register_tools"),
+    ):
+        mock_watcher_instance = MagicMock()
+        MockWatcher.return_value = mock_watcher_instance
+
+        server = create_server(app_config)
+
+        async def run():
+            async with server._lifespan_manager():
+                pass
+
+        asyncio.run(run())
+
+        mock_watcher_instance.stop.assert_called_once()
+
+
+def test_lifespan_yields_index_lock(app_config):
+    """Lifespan yields context dict containing 'index_lock' as a threading.Lock."""
+    import asyncio
+    import threading
+
+    mock_index = MagicMock()
+    mock_index.ntotal = 0
+    captured: list[dict] = []
+
+    with (
+        patch("obsidian_rag.server.build_index", return_value=(mock_index, {}, {})),
+        patch("obsidian_rag.server._check_ollama_health"),
+        patch("obsidian_rag.server.VaultWatcher") as MockWatcher,
+        patch("obsidian_rag.server.register_tools"),
+    ):
+        MockWatcher.return_value = MagicMock()
+
+        server = create_server(app_config)
+
+        async def run():
+            async with server._lifespan_manager():
+                # FastMCP stores the yielded lifespan context in _lifespan_result
+                captured.append(dict(server._lifespan_result))
+
+        asyncio.run(run())
+
+        assert captured, "Lifespan never yielded a context"
+        ctx = captured[0]
+        assert "index_lock" in ctx
+        # threading.Lock() returns a _thread.lock; verify via duck-typing
+        lock = ctx["index_lock"]
+        assert hasattr(lock, "acquire") and hasattr(lock, "release")
