@@ -295,13 +295,13 @@ def test_file_modified_rechunked(watcher_config, vault_indexes, index_lock, vaul
 
         handler._flush()
 
-    # Old chunk (id=0) should be removed, new chunk added
+    # Old chunk content should be replaced with new chunk content
     metadata = vault_indexes["test-vault"]["metadata"]
-    assert "0" not in metadata, "Old chunk metadata should be removed"
     assert len(metadata) == 1, f"Expected 1 new chunk, got {len(metadata)}"
-    # New chunk should reference updated file
+    # New chunk should reference updated file with new heading
     new_meta = list(metadata.values())[0]
     assert new_meta["file"] == "note.md"
+    assert new_meta["heading_path"] == "# Note Updated", "Should have new heading, not old"
 
 
 def test_file_deleted_removed(watcher_config, vault_indexes, index_lock, vault_dir):
