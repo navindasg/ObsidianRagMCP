@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from obsidian_rag.models import AppConfig, EmbeddingConfig, VaultConfig
+from obsidian_rag.models import AppConfig, EmbeddingConfig, RerankConfig, VaultConfig
 from obsidian_rag.server import _check_ollama_health, create_server
 
 
@@ -94,6 +94,54 @@ def test_model_available_exact(app_config):
     """Model listed without tag matches config model exactly."""
     mock_client = MagicMock()
     mock_client.list.return_value = _make_list_response("nomic-embed-text")
+
+    with patch("ollama.Client", return_value=mock_client):
+        # Should NOT raise
+        _check_ollama_health(app_config)
+
+
+# ---------------------------------------------------------------------------
+# Rerank model validation tests
+# ---------------------------------------------------------------------------
+
+
+def test_rerank_model_missing_raises_exit(app_config):
+    """When rerank.enabled=True and model is not pulled, _check_ollama_health raises SystemExit."""
+    app_config.rerank = RerankConfig(enabled=True, model="nonexistent-model", top_n=20)
+
+    mock_client = MagicMock()
+    # Only embedding model is pulled, NOT the rerank model
+    mock_client.list.return_value = _make_list_response("nomic-embed-text")
+
+    with patch("ollama.Client", return_value=mock_client):
+        with pytest.raises(SystemExit) as exc_info:
+            _check_ollama_health(app_config)
+
+    msg = str(exc_info.value)
+    assert "Rerank model" in msg
+    assert "ollama pull" in msg
+
+
+def test_rerank_disabled_skips_model_check(app_config):
+    """When rerank.enabled=False, rerank model is NOT checked even if absent."""
+    app_config.rerank = RerankConfig(enabled=False, model="nonexistent-model", top_n=20)
+
+    mock_client = MagicMock()
+    # Only embedding model is pulled — no rerank model
+    mock_client.list.return_value = _make_list_response("nomic-embed-text")
+
+    with patch("ollama.Client", return_value=mock_client):
+        # Should NOT raise — rerank disabled
+        _check_ollama_health(app_config)
+
+
+def test_rerank_model_present_passes(app_config):
+    """When rerank.enabled=True and model IS pulled, health check passes."""
+    app_config.rerank = RerankConfig(enabled=True, model="llama3.2", top_n=20)
+
+    mock_client = MagicMock()
+    # Both embedding and rerank models are available
+    mock_client.list.return_value = _make_list_response("nomic-embed-text", "llama3.2")
 
     with patch("ollama.Client", return_value=mock_client):
         # Should NOT raise

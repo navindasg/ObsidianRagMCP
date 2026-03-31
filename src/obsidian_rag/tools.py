@@ -1,6 +1,6 @@
 """MCP tool handlers for ObsidianRAG.
 
-Exposes 6 tools: search, read_note, list_notes, find_notes, vault_stats, reindex.
+Exposes 7 tools: search, read_note, list_notes, find_notes, vault_stats, reindex, note_context.
 
 Public API:
     register_tools(mcp: FastMCP, config: AppConfig) -> None
@@ -21,6 +21,7 @@ import ollama
 from obsidian_rag.indexer import build_index
 from obsidian_rag.models import AppConfig
 from obsidian_rag.retriever import search as retriever_search
+from obsidian_rag.wikilinks import find_backlinks, parse_wikilinks, resolve_wikilink
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,9 @@ def register_tools(mcp, config: AppConfig) -> None:
                     tags=tags,
                     folder=folder,
                     vault_name=vault_name,
+                    query_text=query,
+                    rerank_config=cfg.rerank,
+                    ollama_url=cfg.embedding.ollama_url,
                 )
                 all_results.extend(result.get("results", []))
                 if "message" in result:
@@ -407,6 +411,86 @@ def register_tools(mcp, config: AppConfig) -> None:
                 "vault": vault_name,
                 "note_count": note_count,
                 "message": "Reindexing in background",
+            }
+
+    # -----------------------------------------------------------------------
+    # 7. note_context
+    # -----------------------------------------------------------------------
+
+    if "note_context" in config.tools.enabled:
+
+        @mcp.tool
+        def note_context(
+            path: str,
+            vault_name: str | None = None,
+            ctx=None,
+        ) -> dict:
+            """Return a note plus its single-hop backlinks and forward wikilinks.
+
+            Args:
+                path: Relative path to the markdown file within the vault.
+                vault_name: Target vault (uses first vault if None).
+                ctx: FastMCP context (injected automatically).
+
+            Returns:
+                dict with "note", "forward_links", "backlinks" on success,
+                or "error", "path", "suggestion" on failure.
+            """
+            lifespan = ctx.lifespan_context
+            vault_indexes: dict = lifespan["vault_indexes"]
+
+            # Resolve vault (same pattern as read_note)
+            if vault_name is not None and vault_name in vault_indexes:
+                vault_data = vault_indexes[vault_name]
+            else:
+                vault_data = next(iter(vault_indexes.values()))
+
+            vault_config = vault_data["vault_config"]
+            metadata: dict = vault_data["metadata"]
+            vault_root = vault_config.path.resolve()
+
+            # Resolve path and check traversal
+            resolved = (vault_config.path / path).resolve()
+            if not str(resolved).startswith(str(vault_root)):
+                return {
+                    "error": "Path outside vault",
+                    "path": path,
+                    "suggestion": "Use list_notes to browse available files",
+                }
+
+            if not resolved.exists():
+                return {
+                    "error": "Note not found",
+                    "path": path,
+                    "suggestion": "Use find_notes to locate it",
+                }
+
+            content = resolved.read_text(encoding="utf-8")
+
+            # Parse forward wikilinks (D-12)
+            forward_targets = parse_wikilinks(content)
+            forward_links: list[dict] = []
+            seen_targets: set[str] = set()
+            for target in forward_targets:
+                if target in seen_targets:
+                    continue
+                seen_targets.add(target)
+                matches = resolve_wikilink(target, vault_root)
+                if matches:
+                    for match in matches:
+                        rel_path = str(match.relative_to(vault_root))
+                        forward_links.append({"path": rel_path, "exists": True})
+                else:
+                    forward_links.append({"path": target, "exists": False})
+
+            # Find backlinks (D-11) — scan metadata in memory
+            note_basename = resolved.stem
+            backlinks = find_backlinks(note_basename, metadata)
+
+            return {
+                "note": {"path": path, "content": content},
+                "forward_links": forward_links,
+                "backlinks": backlinks,
             }
 
 

@@ -38,6 +38,16 @@ def _check_ollama_health(config: AppConfig) -> None:
             f"Fix: run: ollama pull {config.embedding.model}"
         )
 
+    # Validate rerank model when reranking is enabled
+    if config.rerank.enabled:
+        rerank_model = config.rerank.model or "llama3.2"
+        rerank_base = rerank_model.split(":")[0]
+        if rerank_base not in pulled:
+            raise SystemExit(
+                f"Rerank model '{rerank_model}' not found in Ollama.\n"
+                f"Fix: run: ollama pull {rerank_model}"
+            )
+
 
 def create_server(config: AppConfig) -> FastMCP:
     """Create a FastMCP server with a lifespan that validates Ollama health."""
