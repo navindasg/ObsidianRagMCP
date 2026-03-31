@@ -75,8 +75,15 @@ def register_tools(mcp, config: AppConfig) -> None:
             query_embedding: list[float] = embed_response.embeddings[0]
 
             # Determine which vaults to search
+            if vault_name is not None and vault_name not in vault_indexes:
+                return {
+                    "error": "Vault not found",
+                    "vault_name": vault_name,
+                    "suggestion": f"Available vaults: {list(vault_indexes.keys())}",
+                }
+
             if vault_name is not None:
-                vaults_to_search = {vault_name: vault_indexes[vault_name]} if vault_name in vault_indexes else {}
+                vaults_to_search = {vault_name: vault_indexes[vault_name]}
             else:
                 vaults_to_search = vault_indexes
 
@@ -142,7 +149,14 @@ def register_tools(mcp, config: AppConfig) -> None:
             vault_indexes: dict = lifespan["vault_indexes"]
 
             # Resolve vault
-            if vault_name is not None and vault_name in vault_indexes:
+            if vault_name is not None and vault_name not in vault_indexes:
+                return {
+                    "error": "Vault not found",
+                    "vault_name": vault_name,
+                    "suggestion": f"Available vaults: {list(vault_indexes.keys())}",
+                }
+
+            if vault_name is not None:
                 vault_data = vault_indexes[vault_name]
             else:
                 vault_data = next(iter(vault_indexes.values()))
@@ -203,7 +217,14 @@ def register_tools(mcp, config: AppConfig) -> None:
             vault_indexes: dict = lifespan["vault_indexes"]
 
             # Resolve vault
-            if vault_name is not None and vault_name in vault_indexes:
+            if vault_name is not None and vault_name not in vault_indexes:
+                return {
+                    "error": "Vault not found",
+                    "vault_name": vault_name,
+                    "suggestion": f"Available vaults: {list(vault_indexes.keys())}",
+                }
+
+            if vault_name is not None:
                 vault_data = vault_indexes[vault_name]
             else:
                 vault_data = next(iter(vault_indexes.values()))
@@ -274,7 +295,14 @@ def register_tools(mcp, config: AppConfig) -> None:
             vault_indexes: dict = lifespan["vault_indexes"]
 
             # Determine which vaults to search
-            if vault_name is not None and vault_name in vault_indexes:
+            if vault_name is not None and vault_name not in vault_indexes:
+                return {
+                    "error": "Vault not found",
+                    "vault_name": vault_name,
+                    "suggestion": f"Available vaults: {list(vault_indexes.keys())}",
+                }
+
+            if vault_name is not None:
                 vaults_to_search = {vault_name: vault_indexes[vault_name]}
             else:
                 vaults_to_search = vault_indexes
@@ -440,7 +468,14 @@ def register_tools(mcp, config: AppConfig) -> None:
             vault_indexes: dict = lifespan["vault_indexes"]
 
             # Resolve vault (same pattern as read_note)
-            if vault_name is not None and vault_name in vault_indexes:
+            if vault_name is not None and vault_name not in vault_indexes:
+                return {
+                    "error": "Vault not found",
+                    "vault_name": vault_name,
+                    "suggestion": f"Available vaults: {list(vault_indexes.keys())}",
+                }
+
+            if vault_name is not None:
                 vault_data = vault_indexes[vault_name]
             else:
                 vault_data = next(iter(vault_indexes.values()))
