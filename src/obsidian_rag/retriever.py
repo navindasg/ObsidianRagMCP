@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from typing import TYPE_CHECKING
 
 import faiss
 import numpy as np
+import ollama
 
-from obsidian_rag.models import SearchResult, to_float32
+from obsidian_rag.models import RerankConfig, SearchResult, to_float32
 
 if TYPE_CHECKING:
     pass
@@ -83,6 +85,75 @@ def filter_results(
     return filtered
 
 
+def rerank(
+    candidates: list[tuple[int, float]],
+    metadata: dict[str, dict],
+    query: str,
+    rerank_config: RerankConfig,
+    ollama_url: str,
+) -> list[tuple[int, float]]:
+    """Re-score candidates using an Ollama LLM for pointwise relevance scoring.
+
+    Each candidate is scored independently by asking the LLM to rate relevance
+    on a 0.0-1.0 scale. The rerank score REPLACES the cosine similarity score
+    entirely (D-03). Results are sorted descending by rerank score.
+
+    On ANY error (connection failure, parse failure), falls back to returning
+    candidates unchanged with a warning logged (D-06).
+
+    Args:
+        candidates: List of (chunk_id, cosine_score) pairs to re-score.
+        metadata: Chunk metadata dict keyed by str(chunk_id).
+        query: The original user query text.
+        rerank_config: Reranking configuration (model, top_n, enabled).
+        ollama_url: Base URL for the Ollama server.
+
+    Returns:
+        List of (chunk_id, rerank_score) sorted descending by rerank score.
+    """
+    try:
+        client = ollama.Client(host=ollama_url)
+        model = rerank_config.model or "llama3.2"
+        scored: list[tuple[int, float]] = []
+
+        for chunk_id, _cosine_score in candidates:
+            chunk_text = metadata.get(str(chunk_id), {}).get("text", "")
+            response = client.chat(
+                model=model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Rate relevance of this text to the query on a 0.0-1.0 scale. Reply with only the number.",
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Query: {query}\n\nText: {chunk_text}",
+                    },
+                ],
+            )
+            raw = response.message.content
+            match = re.search(r"(\d+\.?\d*)", raw)
+            if match:
+                rerank_score = float(match.group(1))
+                # Clamp to [0.0, 1.0]
+                rerank_score = max(0.0, min(1.0, rerank_score))
+            else:
+                logger.warning(
+                    "Could not parse rerank score from LLM output for chunk %s: %r — assigning 0.0",
+                    chunk_id,
+                    raw,
+                )
+                rerank_score = 0.0
+            scored.append((chunk_id, rerank_score))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored
+
+    except Exception as exc:
+        logger.warning("Reranking failed, falling back to vector-only: %s", exc)
+        return candidates
+
+
 def search(
     index: faiss.IndexIDMap,
     metadata: dict[str, dict],
@@ -95,6 +166,9 @@ def search(
     modified_after: datetime | None = None,
     modified_before: datetime | None = None,
     vault_name: str | None = None,
+    query_text: str = "",
+    rerank_config: RerankConfig | None = None,
+    ollama_url: str = "http://localhost:11434",
 ) -> dict:
     """Search the FAISS index and return ranked, filtered, token-capped results.
 
@@ -107,7 +181,11 @@ def search(
     faiss.normalize_L2(query_vec)
 
     # 2. Over-fetch to account for post-search filtering (3x top_k, min 1)
-    fetch_k = max(1, min(top_k * 3, index.ntotal))
+    # When reranking is enabled, fetch rerank_config.top_n candidates instead
+    if rerank_config is not None and rerank_config.enabled:
+        fetch_k = max(1, min(rerank_config.top_n, index.ntotal))
+    else:
+        fetch_k = max(1, min(top_k * 3, index.ntotal))
     distances, ids = index.search(query_vec, fetch_k)
 
     # 3. Build candidates, skipping FAISS sentinel -1 values
@@ -133,6 +211,16 @@ def search(
 
     # 6. Sort by score descending
     candidates.sort(key=lambda x: x[1], reverse=True)
+
+    # 6.5 Optional rerank pass (RET-05)
+    if rerank_config is not None and rerank_config.enabled and query_text:
+        candidates = rerank(
+            candidates=candidates,
+            metadata=metadata,
+            query=query_text,
+            rerank_config=rerank_config,
+            ollama_url=ollama_url,
+        )
 
     # 7. Apply token cap and build SearchResult objects
     results: list[SearchResult] = []
