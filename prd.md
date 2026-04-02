@@ -349,7 +349,7 @@ A debounce window of 2 seconds is applied to coalesce rapid edits (e.g., Obsidia
 
 ### 10.2 Runtime Requirements
 
-- Python 3.11+
+- Python 3.12+
 - Ollama installed and running locally with `nomic-embed-text` (or configured model) pulled
 - macOS with Apple Silicon (M1/M2/M3) — optimized for but not exclusive to
 - Obsidian vault(s) on local filesystem
