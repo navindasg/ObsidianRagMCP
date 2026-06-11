@@ -400,3 +400,193 @@ def test_file_renamed(watcher_config, vault_indexes, index_lock, vault_dir):
     assert any(m.get("file") == "new_name.md" for m in metadata.values()), \
         "New path chunks should be added"
     assert "old_name.md" not in file_hashes
+
+
+# ---------------------------------------------------------------------------
+# Exclusion filtering (regression: watcher indexed .trash/templates edits)
+# ---------------------------------------------------------------------------
+
+
+def test_excluded_dir_events_ignored(watcher_config, vault_indexes, index_lock, vault_dir):
+    """Events under excluded_dirs (.trash, .obsidian, templates) are not tracked."""
+    from obsidian_rag.watcher import VaultEventHandler
+
+    handler = VaultEventHandler("test-vault", vault_indexes, index_lock, watcher_config)
+
+    with patch.object(handler, "_reset_timer") as mock_reset:
+        for excluded in (".trash", ".obsidian", "templates"):
+            event = MagicMock()
+            event.is_directory = False
+            event.src_path = str(vault_dir / excluded / "note.md")
+            handler.on_created(event)
+            handler.on_modified(event)
+            handler.on_deleted(event)
+
+        mock_reset.assert_not_called()
+
+    assert handler._pending_upserts == set()
+    assert handler._pending_deletes == set()
+
+
+def test_excluded_pattern_events_ignored(watcher_config, vault_indexes, index_lock, vault_dir):
+    """Events matching excluded_patterns globs are not tracked."""
+    from obsidian_rag.watcher import VaultEventHandler
+
+    vault_indexes["test-vault"]["vault_config"] = vault_indexes["test-vault"][
+        "vault_config"
+    ].model_copy(update={"excluded_patterns": ["daily-*.md"]})
+    handler = VaultEventHandler("test-vault", vault_indexes, index_lock, watcher_config)
+
+    event = MagicMock()
+    event.is_directory = False
+    event.src_path = str(vault_dir / "daily-2024-01-15.md")
+
+    with patch.object(handler, "_reset_timer") as mock_reset:
+        handler.on_modified(event)
+        mock_reset.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Event routing through the real watchdog entry points
+# ---------------------------------------------------------------------------
+
+
+def test_event_routing_to_pending_sets(watcher_config, vault_indexes, index_lock, vault_dir):
+    """on_created/on_modified queue upserts; on_deleted queues deletes."""
+    from obsidian_rag.watcher import VaultEventHandler
+
+    handler = VaultEventHandler("test-vault", vault_indexes, index_lock, watcher_config)
+    md_path = str(vault_dir / "note.md")
+
+    with patch.object(handler, "_reset_timer") as mock_reset:
+        created = MagicMock(is_directory=False, src_path=md_path)
+        handler.on_created(created)
+        assert md_path in handler._pending_upserts
+
+        handler.on_deleted(created)
+        assert md_path in handler._pending_deletes
+
+        assert mock_reset.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Unchanged-content skip (regression: every save re-embedded via Ollama)
+# ---------------------------------------------------------------------------
+
+
+def test_unchanged_content_not_reembedded(watcher_config, vault_indexes, index_lock, vault_dir):
+    """A file whose stored hash matches its content is not re-chunked or re-embedded."""
+    from obsidian_rag.indexer import sha256_file
+    from obsidian_rag.watcher import VaultEventHandler
+
+    md_file = vault_dir / "note.md"
+    md_file.write_text("# Note\n\nStable content.\n", encoding="utf-8")
+    vault_indexes["test-vault"]["file_hashes"]["note.md"] = sha256_file(md_file)
+
+    handler = VaultEventHandler("test-vault", vault_indexes, index_lock, watcher_config)
+
+    with patch("obsidian_rag.watcher.ollama.Client") as mock_client_cls, \
+         patch("obsidian_rag.watcher.chunk_document") as mock_chunk, \
+         patch("obsidian_rag.watcher.persist_index_atomically"):
+
+        with handler._timer_lock:
+            handler._pending_upserts.add(str(md_file))
+        handler._flush()
+
+        mock_chunk.assert_not_called()
+        mock_client_cls.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Embed-failure recovery (regression: drained events were silently lost)
+# ---------------------------------------------------------------------------
+
+
+def test_flush_requeues_upserts_on_embed_failure(
+    watcher_config, vault_indexes, index_lock, vault_dir
+):
+    """Embedding failure re-queues upserts for retry and still applies deletions."""
+    import faiss as faiss_lib
+    import numpy as np
+    from obsidian_rag.watcher import VaultEventHandler
+
+    vi = vault_indexes["test-vault"]
+    old_vector = np.array([[0.5, 0.5, 0.5, 0.5]], dtype=np.float32)
+    faiss_lib.normalize_L2(old_vector)
+    vi["index"].add_with_ids(old_vector, np.array([0], dtype=np.int64))
+    vi["metadata"]["0"] = {"file": "gone.md", "heading_path": "# Gone", "text": "x"}
+    vi["file_hashes"]["gone.md"] = "hash"
+
+    md_file = vault_dir / "note.md"
+    md_file.write_text("# Note\n\nNew content to embed.\n", encoding="utf-8")
+
+    handler = VaultEventHandler("test-vault", vault_indexes, index_lock, watcher_config)
+
+    chunk_result = ({}, [{"text": "chunk", "heading_path": "# Note"}])
+    mock_client = MagicMock()
+    mock_client.embed.side_effect = ConnectionError("ollama down")
+
+    with patch("obsidian_rag.watcher.ollama.Client", return_value=mock_client), \
+         patch("obsidian_rag.watcher.chunk_document", return_value=chunk_result), \
+         patch("obsidian_rag.watcher.persist_index_atomically") as mock_persist:
+
+        with handler._timer_lock:
+            handler._pending_upserts.add(str(md_file))
+            handler._pending_deletes.add(str(vault_dir / "gone.md"))
+        handler._flush()
+
+        # Upsert re-queued for retry; nothing for it was indexed
+        assert str(md_file) in handler._pending_upserts
+        assert not any(
+            m.get("file") == "note.md" for m in vi["metadata"].values()
+        )
+        # Deletion still applied
+        assert vi["index"].ntotal == 0
+        assert "gone.md" not in vi["file_hashes"]
+        assert mock_persist.called
+
+        # Cancel the retry timer so it cannot fire after the test exits
+        with handler._timer_lock:
+            if handler._timer is not None:
+                handler._timer.cancel()
+                handler._timer = None
+
+
+def test_flush_skips_missing_file(watcher_config, vault_indexes, index_lock, vault_dir):
+    """An upsert for a file deleted between event and flush is skipped quietly."""
+    from obsidian_rag.watcher import VaultEventHandler
+
+    handler = VaultEventHandler("test-vault", vault_indexes, index_lock, watcher_config)
+
+    with patch("obsidian_rag.watcher.ollama.Client") as mock_client_cls, \
+         patch("obsidian_rag.watcher.persist_index_atomically"):
+        with handler._timer_lock:
+            handler._pending_upserts.add(str(vault_dir / "vanished.md"))
+        handler._flush()
+
+        mock_client_cls.assert_not_called()
+
+    assert vault_indexes["test-vault"]["metadata"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Shutdown flush (regression: stop() silently discarded buffered changes)
+# ---------------------------------------------------------------------------
+
+
+def test_stop_flushes_pending_changes(watcher_config, vault_indexes, index_lock):
+    """VaultWatcher.stop() flushes buffered events instead of dropping them."""
+    from obsidian_rag.watcher import VaultWatcher
+
+    with patch("obsidian_rag.watcher.Observer"):
+        watcher = VaultWatcher(vault_indexes, watcher_config, index_lock)
+        watcher.start()
+
+        handler = watcher._handlers[0]
+        flushed = []
+        handler._flush = lambda: flushed.append(True)
+
+        watcher.stop()
+
+    assert flushed == [True]
+    assert watcher._handlers == []
