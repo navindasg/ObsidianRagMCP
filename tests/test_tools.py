@@ -218,10 +218,10 @@ def test_search_vault_scoping(mock_ctx):
 
     fake_embedding = [0.1] * 768
 
-    captured_vault_name = {}
+    captured_indexes = []
 
-    def fake_search(index, metadata, query_embedding, vault_name=None, **kwargs):
-        captured_vault_name["val"] = vault_name
+    def fake_search(index, metadata, query_embedding, **kwargs):
+        captured_indexes.append(index)
         return {"results": []}
 
     with (
@@ -234,7 +234,9 @@ def test_search_vault_scoping(mock_ctx):
 
         search_fn(query="test", vault_name="test", ctx=mock_ctx)
 
-    assert captured_vault_name.get("val") == "test"
+    # Exactly one search, against the scoped vault's own index
+    expected_index = mock_ctx.lifespan_context["vault_indexes"]["test"]["index"]
+    assert captured_indexes == [expected_index]
 
 
 def test_search_empty_index(mock_ctx):
@@ -505,3 +507,149 @@ def test_reindex_worker_acquires_lock(mock_ctx):
     assert vault_indexes["test"]["index"] is new_index
     assert vault_indexes["test"]["metadata"] == new_metadata
     assert vault_indexes["test"]["file_hashes"] == new_hashes
+
+
+# ---------------------------------------------------------------------------
+# Path traversal and read-error regression tests
+# ---------------------------------------------------------------------------
+
+
+def test_read_note_blocks_sibling_prefix_escape(tmp_path, app_config):
+    """'../<vault>-private/x.md' must be rejected even though the string
+    starts with the vault root path (regression: startswith prefix check)."""
+    vault = tmp_path / "myvault"
+    vault.mkdir()
+    sibling = tmp_path / "myvault-private"
+    sibling.mkdir()
+    secret = sibling / "secret.md"
+    secret.write_text("# Secret\n\nDo not leak.")
+
+    vault_indexes = {
+        "test": {
+            "index": MagicMock(ntotal=0),
+            "metadata": {},
+            "file_hashes": {},
+            "vault_config": VaultConfig(name="test", path=vault),
+        }
+    }
+    ctx = MagicMock()
+    ctx.lifespan_context = {
+        "vault_indexes": vault_indexes,
+        "config": app_config,
+        "index_lock": threading.Lock(),
+    }
+
+    _, registered = make_mcp_and_register(app_config)
+    for tool in ("read_note", "note_context"):
+        result = registered[tool](path="../myvault-private/secret.md", ctx=ctx)
+        assert result["error"] == "Path outside vault", f"{tool} leaked sibling dir"
+        assert "Do not leak" not in str(result)
+
+
+def test_read_note_rejects_non_markdown_and_excluded(mock_ctx, vault_path):
+    """Non-.md files and notes under excluded dirs are not readable."""
+    (vault_path / ".obsidian").mkdir(exist_ok=True)
+    (vault_path / ".obsidian" / "internal.md").write_text("# Internal")
+    (vault_path / "data.json").write_text("{}")
+
+    _, registered = make_mcp_and_register(mock_ctx.lifespan_context["config"])
+    read_note_fn = registered["read_note"]
+
+    for path in ("data.json", ".obsidian/internal.md"):
+        result = read_note_fn(path=path, ctx=mock_ctx)
+        assert result["error"] == "Not an accessible note", path
+
+
+def test_read_note_malformed_frontmatter_returns_content(mock_ctx, vault_path):
+    """A note with broken YAML frontmatter is still readable (frontmatter={})."""
+    bad = vault_path / "broken.md"
+    bad.write_text("---\ntags: [unclosed\n---\n# Body\n\nStill readable.")
+
+    _, registered = make_mcp_and_register(mock_ctx.lifespan_context["config"])
+    result = registered["read_note"](path="broken.md", ctx=mock_ctx)
+
+    assert "error" not in result
+    assert result["frontmatter"] == {}
+    assert "Still readable" in result["content"]
+
+
+def test_search_returns_structured_error_when_ollama_down(mock_ctx):
+    """An unreachable Ollama yields the structured error dict, not a raw exception."""
+    _, registered = make_mcp_and_register(mock_ctx.lifespan_context["config"])
+    search_fn = registered["search"]
+
+    with patch("obsidian_rag.tools.ollama.Client") as mock_client_cls:
+        mock_client_cls.return_value.embed.side_effect = ConnectionError("refused")
+        result = search_fn(query="anything", ctx=mock_ctx)
+
+    assert "error" in result
+    assert "suggestion" in result
+
+
+def test_search_validates_vault_before_embedding(mock_ctx):
+    """An invalid vault_name fails fast without paying an embedding round trip."""
+    _, registered = make_mcp_and_register(mock_ctx.lifespan_context["config"])
+    search_fn = registered["search"]
+
+    with patch("obsidian_rag.tools.ollama.Client") as mock_client_cls:
+        result = search_fn(query="q", vault_name="nope", ctx=mock_ctx)
+        mock_client_cls.return_value.embed.assert_not_called()
+
+    assert result["error"] == "Vault not found"
+
+
+# ---------------------------------------------------------------------------
+# Reindex error path and failure observability
+# ---------------------------------------------------------------------------
+
+
+def test_reindex_invalid_vault_error(mock_ctx):
+    """reindex returns the standard Vault-not-found error dict."""
+    from obsidian_rag.tools import _reindex_locks
+
+    _reindex_locks.clear()
+    _, registered = make_mcp_and_register(mock_ctx.lifespan_context["config"])
+
+    result = registered["reindex"](vault_name="nonexistent", ctx=mock_ctx)
+
+    assert result["error"] == "Vault not found"
+    assert "test" in result["suggestion"]
+
+
+def test_reindex_worker_releases_lock_and_records_failure(mock_ctx):
+    """A failing build_index still releases the job lock and records the error."""
+    from obsidian_rag import tools
+
+    vault_indexes = mock_ctx.lifespan_context["vault_indexes"]
+    config = mock_ctx.lifespan_context["config"]
+    vault_config = vault_indexes["test"]["vault_config"]
+    tools._reindex_locks.clear()
+    tools._reindex_locks["test"] = True
+
+    with patch("obsidian_rag.tools.build_index", side_effect=RuntimeError("boom")):
+        tools._reindex_worker(
+            vault_indexes=vault_indexes,
+            vault_name="test",
+            config=config,
+            vault_config=vault_config,
+            index_lock=threading.Lock(),
+        )
+
+    assert "test" not in tools._reindex_locks, "Lock must be released on failure"
+    last = vault_indexes["test"]["last_reindex"]
+    assert last["status"] == "failed"
+    assert "boom" in last["error"]
+
+
+def test_vault_stats_surfaces_last_reindex(mock_ctx):
+    """vault_stats exposes the recorded outcome of the last reindex."""
+    mock_ctx.lifespan_context["vault_indexes"]["test"]["last_reindex"] = {
+        "status": "failed",
+        "completed_at": "2026-01-01T00:00:00+00:00",
+        "error": "ollama down",
+    }
+    _, registered = make_mcp_and_register(mock_ctx.lifespan_context["config"])
+
+    result = registered["vault_stats"](ctx=mock_ctx)
+
+    assert result["vaults"][0]["last_reindex"]["status"] == "failed"

@@ -177,8 +177,8 @@ def test_search_scoped_to_vault_a(mock_ctx_two_vaults):
     fake_embedding = [0.1] * 768
     captured_calls = []
 
-    def fake_search(index, metadata, query_embedding, vault_name=None, **kwargs):
-        captured_calls.append({"index": index, "vault_name": vault_name})
+    def fake_search(index, metadata, query_embedding, **kwargs):
+        captured_calls.append({"index": index})
         return {
             "results": [
                 {
@@ -201,9 +201,10 @@ def test_search_scoped_to_vault_a(mock_ctx_two_vaults):
 
         result = search_fn(query="hello", vault_name="vault-a", ctx=mock_ctx_two_vaults)
 
-    # Should only have called retriever_search once (for vault-a only)
+    # Should only have called retriever_search once, against vault-a's index
+    vault_a_index = mock_ctx_two_vaults.lifespan_context["vault_indexes"]["vault-a"]["index"]
     assert len(captured_calls) == 1
-    assert captured_calls[0]["vault_name"] == "vault-a"
+    assert captured_calls[0]["index"] is vault_a_index
 
     # All results should be from vault-a
     for r in result["results"]:
