@@ -105,9 +105,8 @@ def test_l2_to_cosine_identical_vectors():
 
 
 def test_l2_to_cosine_orthogonal():
-    """L2 distance sqrt(2) (~1.414) for orthogonal normalized vectors returns cosine 0.0."""
-    l2_dist = math.sqrt(2)
-    result = l2_to_cosine(l2_dist)
+    """FAISS squared L2 distance 2.0 for orthogonal unit vectors returns cosine 0.0."""
+    result = l2_to_cosine(2.0)
     assert result == 0.0
 
 
@@ -120,13 +119,23 @@ def test_l2_to_cosine_clamps_negative():
 
 def test_l2_to_cosine_rounds_to_2_decimals():
     """Result is rounded to exactly 2 decimal places."""
-    # l2_distance=0.5 -> cosine = 1 - 0.25/2 = 0.875 -> rounds to 0.88
+    # squared_l2=0.5 -> cosine = 1 - 0.5/2 = 0.75
     result = l2_to_cosine(0.5)
-    # Check it's rounded to 2 decimal places
     assert result == round(result, 2)
-    # Also verify the value
-    expected = round(max(0.0, min(1.0, 1.0 - (0.5 ** 2) / 2.0)), 2)
+    expected = round(max(0.0, min(1.0, 1.0 - 0.5 / 2.0)), 2)
     assert result == expected
+
+
+def test_l2_to_cosine_matches_true_cosine():
+    """Scores must equal the true cosine similarity, not an inflated value.
+
+    FAISS IndexFlatL2 reports SQUARED L2 distances; for unit vectors
+    d2 = 2 - 2*cos, so cos=0.9 gives d2=0.2. The old formula squared the
+    already-squared distance and reported 0.98 instead of 0.9.
+    """
+    for true_cos in (0.9, 0.7, 0.3):
+        squared_l2 = 2.0 - 2.0 * true_cos
+        assert l2_to_cosine(squared_l2) == pytest.approx(true_cos, abs=0.005)
 
 
 # ---------------------------------------------------------------------------

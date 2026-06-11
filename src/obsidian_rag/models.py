@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import numpy as np
 from pydantic import BaseModel, Field, field_validator
+
+# Fallback model used for reranking when rerank.model is not configured.
+# Shared by the health check and the reranker so they can never validate
+# a different model than the one actually used.
+DEFAULT_RERANK_MODEL = "llama3.2"
 
 
 class VaultConfig(BaseModel):

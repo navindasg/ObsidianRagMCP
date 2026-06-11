@@ -9,7 +9,7 @@ import ollama as ollama_client
 from fastmcp import FastMCP
 
 from obsidian_rag.indexer import build_index
-from obsidian_rag.models import AppConfig
+from obsidian_rag.models import DEFAULT_RERANK_MODEL, AppConfig
 from obsidian_rag.tools import register_tools
 from obsidian_rag.watcher import VaultWatcher
 
@@ -40,7 +40,7 @@ def _check_ollama_health(config: AppConfig) -> None:
 
     # Validate rerank model when reranking is enabled
     if config.rerank.enabled:
-        rerank_model = config.rerank.model or "llama3.2"
+        rerank_model = config.rerank.model or DEFAULT_RERANK_MODEL
         rerank_base = rerank_model.split(":")[0]
         if rerank_base not in pulled:
             raise SystemExit(

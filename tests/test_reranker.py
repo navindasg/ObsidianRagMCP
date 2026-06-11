@@ -66,14 +66,20 @@ def test_rerank_resorts_candidates():
     metadata = _make_metadata(1, 2, 3)
     rerank_cfg = RerankConfig(enabled=True, model="llama3.2", top_n=20)
 
-    # LLM returns scores [0.3, 0.9, 0.6] for chunks 1, 2, 3 respectively
-    side_effects = [
-        _make_chat_response("0.3"),
-        _make_chat_response("0.9"),
-        _make_chat_response("0.6"),
-    ]
+    # LLM returns scores [0.3, 0.9, 0.6] for chunks 1, 2, 3 respectively.
+    # Keyed off the prompt content so the mapping holds regardless of the
+    # order in which (possibly concurrent) rerank calls arrive.
+    scores_by_chunk = {"chunk 1": "0.3", "chunk 2": "0.9", "chunk 3": "0.6"}
+
+    def chat_side_effect(**kwargs):
+        user_content = kwargs["messages"][1]["content"]
+        for marker, score in scores_by_chunk.items():
+            if marker in user_content:
+                return _make_chat_response(score)
+        raise AssertionError(f"Unexpected rerank prompt: {user_content!r}")
+
     mock_client = MagicMock()
-    mock_client.chat.side_effect = side_effects
+    mock_client.chat.side_effect = chat_side_effect
 
     with patch("obsidian_rag.retriever.ollama.Client", return_value=mock_client):
         result = rerank(
@@ -143,12 +149,16 @@ def test_rerank_fallback_on_parse_error(caplog):
     metadata = _make_metadata(1, 2)
     rerank_cfg = RerankConfig(enabled=True, model="llama3.2", top_n=20)
 
-    # First response is parseable, second is not
+    # chunk 1's response is parseable, chunk 2's is not (content-keyed so the
+    # mapping is stable under concurrent rerank calls)
+    def chat_side_effect(**kwargs):
+        user_content = kwargs["messages"][1]["content"]
+        if "chunk 1" in user_content:
+            return _make_chat_response("0.7")
+        return _make_chat_response("I cannot rate this")
+
     mock_client = MagicMock()
-    mock_client.chat.side_effect = [
-        _make_chat_response("0.7"),
-        _make_chat_response("I cannot rate this"),
-    ]
+    mock_client.chat.side_effect = chat_side_effect
 
     with patch("obsidian_rag.retriever.ollama.Client", return_value=mock_client):
         with caplog.at_level(logging.WARNING, logger="obsidian_rag.retriever"):
