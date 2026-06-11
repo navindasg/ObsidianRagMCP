@@ -172,21 +172,30 @@ def recursive_split(
         separators: Custom separator list (default hierarchy used if None).
 
     Returns:
-        List of text strings, each within chunk_max_tokens. Chunks smaller than
-        MIN_CHUNK_CHARS (200 chars) are discarded.
+        List of text strings, each within chunk_max_tokens. When the text
+        splits into multiple chunks, fragments smaller than MIN_CHUNK_CHARS
+        (200 chars, capped at chunk_max_tokens * 4) are discarded; a text
+        that fits in a single chunk is always kept whole.
     """
     if separators is None:
         separators = ["\n\n", "\n", " ", ""]
 
     def _trim_to_tokens(parts: list[str], token_limit: int, sep: str) -> list[str]:
-        """Return the tail of parts that fits within token_limit tokens."""
-        kept = []
-        total = 0
+        """Return the tail of parts that fits within token_limit tokens.
+
+        Counts characters (including separators) rather than per-part token
+        estimates: short parts would otherwise round to 0 tokens and be kept
+        without bound, making "zero overlap" duplicate entire chunks.
+        """
+        if token_limit <= 0:
+            return []
+        kept: list[str] = []
+        total_chars = 0
         for part in reversed(parts):
-            part_tokens = _token_estimate(part)
-            if total + part_tokens <= token_limit:
+            candidate_chars = total_chars + len(part) + (len(sep) if kept else 0)
+            if candidate_chars // 4 <= token_limit:
                 kept.insert(0, part)
-                total += part_tokens
+                total_chars = candidate_chars
             else:
                 break
         return kept
@@ -197,12 +206,7 @@ def recursive_split(
 
     def _split_inner(text: str, seps: list[str]) -> list[str]:
         if not seps or _token_estimate(text) <= chunk_max_tokens:
-            if text.strip() and len(text.strip()) >= MIN_CHUNK_CHARS:
-                return [text]
-            elif text.strip():
-                # Too small but not empty — return anyway; caller filters
-                return [text]
-            return []
+            return [text] if text.strip() else []
 
         sep = seps[0]
         if sep:
@@ -243,7 +247,16 @@ def recursive_split(
         return [r for r in result if r.strip()]
 
     raw_chunks = _split_inner(text, separators)
-    return [c for c in raw_chunks if len(c.strip()) >= MIN_CHUNK_CHARS]
+
+    # A document (or section) that fits in a single chunk is kept whole even
+    # when short — discarding it would silently make the note unsearchable.
+    if len(raw_chunks) <= 1:
+        return raw_chunks
+
+    # The minimum is moot when the configured max chunk size is itself smaller:
+    # no chunk could ever reach MIN_CHUNK_CHARS, so everything would be dropped.
+    min_chars = min(MIN_CHUNK_CHARS, chunk_max_tokens * 4)
+    return [c for c in raw_chunks if len(c.strip()) >= min_chars]
 
 
 def chunk_by_headings(
@@ -269,7 +282,13 @@ def chunk_by_headings(
     Returns:
         List of chunk dicts.
     """
-    matches = list(HEADING_RE.finditer(text))
+    # Ignore heading-like lines inside fenced code blocks (e.g. "# comment").
+    fence_spans = [m.span() for m in CODE_FENCE_RE.finditer(text)]
+    matches = [
+        m
+        for m in HEADING_RE.finditer(text)
+        if not any(start <= m.start() < end for start, end in fence_spans)
+    ]
 
     if not matches:
         # No headings — apply recursive splitter to the whole document.
@@ -279,6 +298,13 @@ def chunk_by_headings(
         ]
 
     sections = []
+
+    # Content before the first heading (intro paragraphs) must not be lost.
+    preamble = text[: matches[0].start()]
+    if preamble.strip():
+        for chunk in recursive_split(preamble, chunk_max_tokens, chunk_overlap):
+            sections.append({"heading_path": "", "text": chunk})
+
     for i, match in enumerate(matches):
         start = match.start()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)

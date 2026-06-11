@@ -270,3 +270,65 @@ def test_minimum_chunk_discarded():
         assert len(chunk) >= 200, (
             f"Chunk below minimum size (200 chars) was not discarded: {chunk!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: preamble loss, code-fence headings, short notes, overlap
+# ---------------------------------------------------------------------------
+
+def test_preamble_before_first_heading_is_chunked():
+    """Content before the first heading must be indexed, not silently dropped."""
+    intro = (
+        "This is an important introductory paragraph that appears before any "
+        "heading. It contains key context about the entire note and must be "
+        "searchable. " * 2
+    )
+    text = f"{intro}\n\n# First Heading\n\nSection content here."
+    chunks = chunk_by_headings(text, chunk_max_tokens=512, chunk_overlap=0)
+
+    all_text = " ".join(c["text"] for c in chunks)
+    assert "important introductory paragraph" in all_text
+
+    preamble_chunks = [c for c in chunks if c["heading_path"] == ""]
+    assert preamble_chunks, "Preamble should produce a chunk with empty heading_path"
+
+
+def test_heading_inside_code_fence_not_treated_as_heading():
+    """A '# comment' line inside a fenced code block is not a section boundary."""
+    text = (
+        "# Real Heading\n\nIntro text.\n\n"
+        "```python\n# this is just a comment\nx = 1\n```\n\nTrailing text."
+    )
+    chunks = chunk_by_headings(text, chunk_max_tokens=512, chunk_overlap=0)
+
+    for chunk in chunks:
+        assert "# this is just a comment" not in chunk["heading_path"], (
+            f"Code comment leaked into heading_path: {chunk['heading_path']!r}"
+        )
+    # The code block must survive intact in some chunk
+    all_text = "\n".join(c["text"] for c in chunks)
+    assert "# this is just a comment" in all_text
+
+
+def test_short_note_without_headings_is_still_chunked():
+    """A note shorter than MIN_CHUNK_CHARS must still produce one chunk."""
+    text = "A tiny but meaningful note."
+    chunks = recursive_split(text, chunk_max_tokens=512, chunk_overlap=50)
+    assert chunks == [text]
+
+    heading_chunks = chunk_by_headings(text, chunk_max_tokens=512, chunk_overlap=50)
+    assert len(heading_chunks) == 1
+    assert heading_chunks[0]["text"] == text
+
+
+def test_zero_overlap_does_not_duplicate_content():
+    """chunk_overlap=0 must not carry previous chunk content into the next one."""
+    long_code = "x = " + "1" * 500
+    text = f"```python\n{long_code}\n```"
+    chunks = recursive_split(text, chunk_max_tokens=10, chunk_overlap=0)
+
+    assert len(chunks) > 1, "Oversized code block should still be split"
+    total_chars = sum(len(c) for c in chunks)
+    assert total_chars <= len(text) + len(chunks), (
+        f"Chunks duplicate content: {total_chars} chars from a {len(text)}-char input"
+    )
