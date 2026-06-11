@@ -17,6 +17,7 @@ from pathlib import Path
 
 import frontmatter
 import ollama
+from fastmcp import Context
 
 from obsidian_rag.indexer import build_index
 from obsidian_rag.models import AppConfig
@@ -52,7 +53,7 @@ def register_tools(mcp, config: AppConfig) -> None:
             vault_name: str | None = None,
             tags: list[str] | None = None,
             folder: str | None = None,
-            ctx=None,
+            ctx: Context | None = None,
         ) -> dict:
             """Semantic search across one or all Obsidian vaults.
 
@@ -132,7 +133,7 @@ def register_tools(mcp, config: AppConfig) -> None:
         def read_note(
             path: str,
             vault_name: str | None = None,
-            ctx=None,
+            ctx: Context | None = None,
         ) -> dict:
             """Read the full content of a note from the vault.
 
@@ -201,7 +202,7 @@ def register_tools(mcp, config: AppConfig) -> None:
         def list_notes(
             path_prefix: str | None = None,
             vault_name: str | None = None,
-            ctx=None,
+            ctx: Context | None = None,
         ) -> dict:
             """List all markdown files in a vault with metadata.
 
@@ -279,7 +280,7 @@ def register_tools(mcp, config: AppConfig) -> None:
         def find_notes(
             query: str,
             vault_name: str | None = None,
-            ctx=None,
+            ctx: Context | None = None,
         ) -> dict:
             """Find notes by filename or heading substring (case-insensitive).
 
@@ -333,7 +334,7 @@ def register_tools(mcp, config: AppConfig) -> None:
     if "vault_stats" in config.tools.enabled:
 
         @mcp.tool
-        def vault_stats(ctx=None) -> dict:
+        def vault_stats(ctx: Context | None = None) -> dict:
             """Return statistics for each vault and aggregate totals.
 
             Returns:
@@ -389,7 +390,7 @@ def register_tools(mcp, config: AppConfig) -> None:
     if "reindex" in config.tools.enabled:
 
         @mcp.tool
-        def reindex(vault_name: str, ctx=None) -> dict:
+        def reindex(vault_name: str, ctx: Context | None = None) -> dict:
             """Trigger a background reindex of a vault.
 
             Returns immediately with status "started" or "already_running".
@@ -451,7 +452,7 @@ def register_tools(mcp, config: AppConfig) -> None:
         def note_context(
             path: str,
             vault_name: str | None = None,
-            ctx=None,
+            ctx: Context | None = None,
         ) -> dict:
             """Return a note plus its single-hop backlinks and forward wikilinks.
 
