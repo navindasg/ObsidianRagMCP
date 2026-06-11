@@ -22,7 +22,12 @@ from fastmcp import Context
 from obsidian_rag.indexer import build_index
 from obsidian_rag.models import AppConfig
 from obsidian_rag.retriever import search as retriever_search
-from obsidian_rag.wikilinks import find_backlinks, parse_wikilinks, resolve_wikilink
+from obsidian_rag.wikilinks import (
+    build_note_index,
+    find_backlinks,
+    parse_wikilinks,
+    resolve_wikilink,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -503,15 +508,16 @@ def register_tools(mcp, config: AppConfig) -> None:
 
             content = resolved.read_text(encoding="utf-8")
 
-            # Parse forward wikilinks (D-12)
+            # Parse forward wikilinks (D-12); one note index serves all targets
             forward_targets = parse_wikilinks(content)
+            note_index = build_note_index(vault_root) if forward_targets else {}
             forward_links: list[dict] = []
             seen_targets: set[str] = set()
             for target in forward_targets:
                 if target in seen_targets:
                     continue
                 seen_targets.add(target)
-                matches = resolve_wikilink(target, vault_root)
+                matches = resolve_wikilink(target, vault_root, note_index=note_index)
                 if matches:
                     for match in matches:
                         rel_path = str(match.relative_to(vault_root))

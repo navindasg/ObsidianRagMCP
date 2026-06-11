@@ -1,13 +1,15 @@
 """Wikilink parsing and resolution utilities for ObsidianRAG.
 
-Provides three public functions:
+Public API:
     parse_wikilinks(text) -> list[str]
-    resolve_wikilink(target, vault_root) -> list[Path]
+    build_note_index(vault_root) -> dict[str, list[Path]]
+    resolve_wikilink(target, vault_root, note_index=None) -> list[Path]
     find_backlinks(note_name, metadata) -> list[dict]
 
 Design decisions:
 - D-09: Embed syntax (![[...]]) excluded from link parsing via negative lookbehind
-- D-10: resolve_wikilink matches by case-insensitive basename, .md extension optional
+- D-10: resolve_wikilink matches by case-insensitive basename, .md extension
+  optional; path-qualified targets ([[folder/note]]) match by relative path
 - D-11: find_backlinks scans metadata text fields in memory (no disk reads)
 - D-13: find_backlinks returns {source_path, heading_path, snippet} per entry
 """
@@ -45,28 +47,56 @@ def parse_wikilinks(text: str) -> list[str]:
     return targets
 
 
-def resolve_wikilink(target: str, vault_root: Path) -> list[Path]:
+def build_note_index(vault_root: Path) -> dict[str, list[Path]]:
+    """Map lowercase .md basenames to their paths under vault_root.
+
+    Build once per operation and pass to resolve_wikilink to avoid one full
+    vault walk per link target.
+    """
+    note_index: dict[str, list[Path]] = {}
+    for md_file in sorted(vault_root.rglob("*.md")):
+        note_index.setdefault(md_file.name.lower(), []).append(md_file)
+    return note_index
+
+
+def resolve_wikilink(
+    target: str,
+    vault_root: Path,
+    note_index: dict[str, list[Path]] | None = None,
+) -> list[Path]:
     """Find markdown files in vault_root matching the given wikilink target.
 
-    Matching is case-insensitive by basename. Target may or may not include .md.
+    Matching is case-insensitive. Target may or may not include .md. A
+    path-qualified target like "folder/note" matches by relative path suffix
+    (Obsidian's disambiguation syntax), not by basename alone.
 
     Args:
-        target: Wikilink target string (e.g. "wsn-pipeline" or "wsn-pipeline.md").
+        target: Wikilink target string (e.g. "wsn-pipeline" or "projects/wsn-pipeline").
         vault_root: Root Path of the vault to search.
+        note_index: Optional prebuilt map from build_note_index; built on the
+            fly when omitted.
 
     Returns:
         List of matching Path objects (all matches for ambiguous cases).
     """
-    # Normalize: lowercase, ensure .md extension
     target_lower = target.lower()
     if not target_lower.endswith(".md"):
-        target_lower_md = target_lower + ".md"
-    else:
-        target_lower_md = target_lower
+        target_lower += ".md"
 
+    if note_index is None:
+        note_index = build_note_index(vault_root)
+
+    basename = target_lower.rsplit("/", 1)[-1]
+    candidates = note_index.get(basename, [])
+
+    if "/" not in target_lower:
+        return list(candidates)
+
+    # Path-qualified link: the relative path must equal or end with the target.
     matches: list[Path] = []
-    for md_file in vault_root.rglob("*.md"):
-        if md_file.name.lower() == target_lower_md:
+    for md_file in candidates:
+        rel = str(md_file.relative_to(vault_root)).replace("\\", "/").lower()
+        if rel == target_lower or rel.endswith("/" + target_lower):
             matches.append(md_file)
     return matches
 
@@ -74,8 +104,9 @@ def resolve_wikilink(target: str, vault_root: Path) -> list[Path]:
 def find_backlinks(note_name: str, metadata: dict[str, dict]) -> list[dict]:
     """Scan chunk metadata text fields for references to note_name.
 
-    Matches [[note_name]], [[note_name|alias]], and [[note_name#heading]] variants
-    using case-insensitive search. Deduplicates results by source_path.
+    Matches [[note]], [[note|alias]], [[note#heading]], and path-qualified
+    [[folder/note]] variants using case-insensitive search. Deduplicates
+    results by source_path.
 
     Args:
         note_name: The basename of the note to find backlinks for (no .md extension).
@@ -84,23 +115,21 @@ def find_backlinks(note_name: str, metadata: dict[str, dict]) -> list[dict]:
     Returns:
         List of dicts with keys: source_path, heading_path, snippet (first 200 chars).
     """
-    note_lower = note_name.lower()
+    # [[, optional "path/" prefix, the note name, optional .md, then an
+    # alias pipe, heading hash, or closing brackets.
+    backlink_re = re.compile(
+        r"\[\[(?:[^\]|#]*/)?"
+        + re.escape(note_name.lower())
+        + r"(?:\.md)?\s*(?:[|#]|\]\])"
+    )
+
     seen_paths: set[str] = set()
     results: list[dict] = []
 
     for chunk in metadata.values():
         text: str = chunk.get("text", "")
-        text_lower = text.lower()
 
-        # Check for any wikilink variant referencing this note:
-        # [[note_name]], [[note_name|...]], [[note_name#...]]
-        found = (
-            f"[[{note_lower}]]" in text_lower
-            or f"[[{note_lower}|" in text_lower
-            or f"[[{note_lower}#" in text_lower
-        )
-
-        if found:
+        if backlink_re.search(text.lower()):
             source_path = chunk.get("file", "")
             if source_path in seen_paths:
                 continue

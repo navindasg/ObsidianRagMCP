@@ -260,3 +260,86 @@ def test_find_backlinks_heading_variant():
     result = find_backlinks("target-note", metadata)
 
     assert len(result) == 1
+
+
+# ---------------------------------------------------------------------------
+# Path-qualified wikilink tests (regression: [[folder/note]] never resolved)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_wikilink_path_qualified(tmp_path):
+    """[[folder/note]] resolves to the note at that relative path."""
+    from obsidian_rag.wikilinks import resolve_wikilink
+
+    (tmp_path / "projects").mkdir()
+    target_file = tmp_path / "projects" / "alpha.md"
+    target_file.write_text("# Alpha")
+    # Same basename elsewhere must NOT match a path-qualified link
+    other = tmp_path / "alpha.md"
+    other.write_text("# Other Alpha")
+
+    result = resolve_wikilink("projects/Alpha", tmp_path)
+
+    assert result == [target_file]
+
+
+def test_resolve_wikilink_path_qualified_no_match(tmp_path):
+    """[[wrong-folder/note]] returns no matches even when the basename exists."""
+    from obsidian_rag.wikilinks import resolve_wikilink
+
+    (tmp_path / "projects").mkdir()
+    (tmp_path / "projects" / "alpha.md").write_text("# Alpha")
+
+    result = resolve_wikilink("archive/alpha", tmp_path)
+
+    assert result == []
+
+
+def test_resolve_wikilink_with_prebuilt_index(tmp_path):
+    """A prebuilt note index produces the same result as an on-the-fly walk."""
+    from obsidian_rag.wikilinks import build_note_index, resolve_wikilink
+
+    note = tmp_path / "beta.md"
+    note.write_text("# Beta")
+    index = build_note_index(tmp_path)
+
+    assert resolve_wikilink("beta", tmp_path, note_index=index) == [note]
+
+
+def test_find_backlinks_path_qualified():
+    """find_backlinks detects [[folder/note]] references to the note."""
+    from obsidian_rag.wikilinks import find_backlinks
+
+    metadata = {
+        "0": {
+            "chunk_id": 0,
+            "file": "notes/src.md",
+            "heading_path": "# Src",
+            "text": "Link here: [[projects/Alpha]] for details.",
+            "tags": [],
+            "vault": "test",
+        }
+    }
+
+    result = find_backlinks("Alpha", metadata)
+
+    assert len(result) == 1
+    assert result[0]["source_path"] == "notes/src.md"
+
+
+def test_find_backlinks_does_not_match_substring_names():
+    """A note named 'alpha' must not match links to 'alphabet'."""
+    from obsidian_rag.wikilinks import find_backlinks
+
+    metadata = {
+        "0": {
+            "chunk_id": 0,
+            "file": "notes/src.md",
+            "heading_path": "# Src",
+            "text": "See [[alphabet]] for the full list.",
+            "tags": [],
+            "vault": "test",
+        }
+    }
+
+    assert find_backlinks("alpha", metadata) == []
