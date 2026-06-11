@@ -27,7 +27,6 @@ vaults:
 #   watch_enabled: true
 
 # retrieval:
-#   enabled: true
 #   top_k: 5
 #   similarity_threshold: 0.7
 #   max_context_tokens: 4000
@@ -57,20 +56,22 @@ def generate_default_config(path: Path) -> None:
 
 def _apply_overrides(raw: dict, overrides: dict) -> None:
     """Apply CLI overrides into the raw config dict (in place)."""
-    if overrides.get("vault_path") is not None:
-        vaults = raw.setdefault("vaults", [{}])
+    if overrides.get("vault_path") is not None or overrides.get("vault_name") is not None:
+        # A bare "vaults:" key in YAML loads as None; normalize before indexing.
+        vaults = raw.get("vaults") or []
         if not vaults:
             vaults.append({})
-        vaults[0]["path"] = overrides["vault_path"]
+        raw["vaults"] = vaults
 
-    if overrides.get("vault_name") is not None:
-        vaults = raw.setdefault("vaults", [{}])
-        if not vaults:
-            vaults.append({})
-        vaults[0]["name"] = overrides["vault_name"]
+        if overrides.get("vault_path") is not None:
+            vaults[0]["path"] = overrides["vault_path"]
+        if overrides.get("vault_name") is not None:
+            vaults[0]["name"] = overrides["vault_name"]
 
     if overrides.get("ollama_url") is not None:
-        raw.setdefault("embedding", {})["ollama_url"] = overrides["ollama_url"]
+        embedding = raw.get("embedding") or {}
+        embedding["ollama_url"] = overrides["ollama_url"]
+        raw["embedding"] = embedding
 
 
 def load_config(config_path: str, overrides: dict | None = None) -> AppConfig:
@@ -89,8 +90,11 @@ def load_config(config_path: str, overrides: dict | None = None) -> AppConfig:
             "Edit it to set your vault name and path, then restart."
         )
 
-    with open(path, encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+    except yaml.YAMLError as e:
+        raise SystemExit(f"Config file {path} is not valid YAML:\n{e}") from None
 
     if overrides:
         _apply_overrides(raw, overrides)

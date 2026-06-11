@@ -29,6 +29,17 @@ logger = logging.getLogger(__name__)
 )
 def cli(config_path, vault_path, vault_name, ollama_url, verbose, debug):
     """ObsidianRAG MCP server for Claude Desktop."""
+    # Route logs to stderr (stdout carries the MCP stdio protocol). basicConfig
+    # is a no-op when a handler already exists (e.g. the python -m entry point
+    # configured one), but the console script lands here unconfigured — without
+    # a handler, --verbose/--debug would change the level of a logger that
+    # never emits anything below WARNING.
+    logging.basicConfig(
+        stream=sys.stderr,
+        level=logging.WARNING,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
     if debug:
         logging.getLogger().setLevel(logging.DEBUG)
     elif verbose:

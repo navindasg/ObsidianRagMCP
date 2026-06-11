@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 from pydantic import BaseModel, Field, field_validator
@@ -14,12 +15,14 @@ DEFAULT_RERANK_MODEL = "llama3.2"
 class VaultConfig(BaseModel):
     name: str
     path: Path
-    excluded_dirs: list[str] = Field(default=[".obsidian", ".trash", "templates"])
-    excluded_patterns: list[str] = Field(default=[])
+    excluded_dirs: list[str] = Field(
+        default_factory=lambda: [".obsidian", ".trash", "templates"]
+    )
+    excluded_patterns: list[str] = Field(default_factory=list)
 
     @field_validator("path", mode="before")
     @classmethod
-    def expand_tilde(cls, v) -> Path:
+    def expand_tilde(cls, v: str | Path) -> Path:
         return Path(str(v)).expanduser()
 
     @field_validator("path")
@@ -37,29 +40,40 @@ class EmbeddingConfig(BaseModel):
 
 
 class IndexingConfig(BaseModel):
-    chunk_strategy: str = Field(default="heading")
-    chunk_max_tokens: int = Field(default=512)
-    chunk_overlap: int = Field(default=50)
-    include_frontmatter: str = Field(default="metadata_only")
+    # Literal types reject config typos like "fiexd" at load time instead of
+    # silently falling back to the default behavior.
+    chunk_strategy: Literal["heading", "fixed"] = Field(default="heading")
+    chunk_max_tokens: int = Field(default=512, gt=0)
+    chunk_overlap: int = Field(default=50, ge=0)
+    include_frontmatter: Literal["metadata_only", "embed", "ignore"] = Field(
+        default="metadata_only"
+    )
     watch_enabled: bool = Field(default=True)
 
 
 class RetrievalConfig(BaseModel):
-    enabled: bool = Field(default=True)
-    top_k: int = Field(default=5)
-    similarity_threshold: float = Field(default=0.7)
-    max_context_tokens: int = Field(default=4000)
+    top_k: int = Field(default=5, gt=0)
+    similarity_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
+    max_context_tokens: int = Field(default=4000, gt=0)
 
 
 class RerankConfig(BaseModel):
     enabled: bool = Field(default=False)
     model: str | None = Field(default=None)
-    top_n: int = Field(default=20)
+    top_n: int = Field(default=20, gt=0)
 
 
 class ToolsConfig(BaseModel):
     enabled: list[str] = Field(
-        default=["search", "read_note", "list_notes", "find_notes", "note_context", "vault_stats", "reindex"]
+        default_factory=lambda: [
+            "search",
+            "read_note",
+            "list_notes",
+            "find_notes",
+            "note_context",
+            "vault_stats",
+            "reindex",
+        ]
     )
 
 
@@ -74,8 +88,6 @@ class AppConfig(BaseModel):
 
 class ChunkMetadata(BaseModel):
     """Metadata for a single chunk stored alongside the FAISS index."""
-
-    model_config = {"arbitrary_types_allowed": True}
 
     chunk_id: int
     file: str  # relative path from vault root

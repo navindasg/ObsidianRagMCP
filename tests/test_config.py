@@ -172,3 +172,73 @@ def test_cli_override_ollama_url(tmp_path):
     )
 
     assert cfg.embedding.ollama_url == "http://custom:1234"
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: null vaults override, invalid YAML, typo'd enum values
+# ---------------------------------------------------------------------------
+
+
+def test_override_with_null_vaults_key(tmp_path):
+    """A bare 'vaults:' key (YAML null) must not crash _apply_overrides."""
+    from obsidian_rag.config import load_config
+
+    vault_dir = tmp_path / "vault"
+    vault_dir.mkdir()
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("vaults:\n")
+
+    cfg = load_config(
+        str(config_file),
+        overrides={"vault_path": str(vault_dir), "vault_name": "cli-vault"},
+    )
+
+    assert cfg.vaults[0].name == "cli-vault"
+    assert cfg.vaults[0].path == vault_dir
+
+
+def test_invalid_yaml_exits_with_friendly_message(tmp_path):
+    """Malformed YAML produces a SystemExit message, not a raw traceback."""
+    from obsidian_rag.config import load_config
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("vaults: [unclosed\n  - oops")
+
+    with pytest.raises(SystemExit) as exc_info:
+        load_config(str(config_file))
+
+    assert "not valid YAML" in str(exc_info.value)
+
+
+def test_chunk_strategy_typo_rejected(tmp_path):
+    """A typo'd chunk_strategy fails validation instead of silently defaulting."""
+    from obsidian_rag.models import AppConfig
+    from pydantic import ValidationError
+
+    vault_dir = tmp_path / "vault"
+    vault_dir.mkdir()
+
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate(
+            {
+                "vaults": [{"name": "v", "path": str(vault_dir)}],
+                "indexing": {"chunk_strategy": "fiexd"},
+            }
+        )
+
+
+def test_include_frontmatter_typo_rejected(tmp_path):
+    """An invalid include_frontmatter mode fails validation at load time."""
+    from obsidian_rag.models import AppConfig
+    from pydantic import ValidationError
+
+    vault_dir = tmp_path / "vault"
+    vault_dir.mkdir()
+
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate(
+            {
+                "vaults": [{"name": "v", "path": str(vault_dir)}],
+                "indexing": {"include_frontmatter": "everything"},
+            }
+        )

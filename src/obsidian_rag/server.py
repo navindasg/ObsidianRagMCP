@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 import ollama as ollama_client
 from fastmcp import FastMCP
 
+import obsidian_rag
 from obsidian_rag.indexer import build_index
 from obsidian_rag.models import DEFAULT_RERANK_MODEL, AppConfig
 from obsidian_rag.tools import register_tools
@@ -59,8 +60,8 @@ def create_server(config: AppConfig) -> FastMCP:
         vault_count = len(config.vaults)
         try:
             version_str = importlib.metadata.version("obsidian-rag")
-        except Exception:
-            version_str = "0.1.0"
+        except importlib.metadata.PackageNotFoundError:
+            version_str = obsidian_rag.__version__
 
         print(
             f"obsidian-rag v{version_str} | {vault_count} vault{'s' if vault_count != 1 else ''} | Ollama OK",
