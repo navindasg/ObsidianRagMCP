@@ -248,7 +248,7 @@ def test_find_changed_files_detects_new(tmp_path):
     new_file = vault / "new.md"
     new_file.write_text("# New\nContent")
 
-    to_reindex, deleted = find_changed_files(vault, [new_file], stored_hashes={})
+    to_reindex, deleted, current_hashes = find_changed_files(vault, [new_file], stored_hashes={})
 
     assert new_file in to_reindex
     assert len(deleted) == 0
@@ -263,7 +263,7 @@ def test_find_changed_files_detects_modified(tmp_path):
 
     # Store a different (stale) hash
     stored = {"modified.md": "stalehash000"}
-    to_reindex, deleted = find_changed_files(vault, [modified], stored_hashes=stored)
+    to_reindex, deleted, current_hashes = find_changed_files(vault, [modified], stored_hashes=stored)
 
     assert modified in to_reindex
 
@@ -275,7 +275,7 @@ def test_find_changed_files_detects_deleted(tmp_path):
 
     # File exists in stored hashes but not on disk
     stored = {"ghost.md": "abc123"}
-    to_reindex, deleted = find_changed_files(vault, [], stored_hashes=stored)
+    to_reindex, deleted, current_hashes = find_changed_files(vault, [], stored_hashes=stored)
 
     assert "ghost.md" in deleted
 
@@ -290,7 +290,7 @@ def test_find_changed_files_skips_unchanged(tmp_path):
     actual_hash = sha256_file(unchanged)
     stored = {"unchanged.md": actual_hash}
 
-    to_reindex, deleted = find_changed_files(vault, [unchanged], stored_hashes=stored)
+    to_reindex, deleted, current_hashes = find_changed_files(vault, [unchanged], stored_hashes=stored)
 
     assert unchanged not in to_reindex
     assert len(deleted) == 0
@@ -353,3 +353,112 @@ def test_build_index_full_pipeline(tmp_path):
     for chunk_meta in metadata.values():
         assert "text" in chunk_meta
         assert isinstance(chunk_meta["text"], str)
+
+
+# ---------------------------------------------------------------------------
+# Incremental rebuild tests (existing persisted index)
+# ---------------------------------------------------------------------------
+
+
+def _build_with_mocked_ollama(tmp_path, config, vault_config):
+    """Run build_index with Ollama mocked and storage rooted at tmp_path."""
+    with patch("obsidian_rag.indexer.ollama_client.Client") as mock_cls:
+        mock_client = MagicMock()
+        mock_client.embed.side_effect = lambda model, input: MagicMock(
+            embeddings=[[0.1] * 768] * len(input)
+        )
+        mock_cls.return_value = mock_client
+        with patch("obsidian_rag.indexer.Path.home", return_value=tmp_path):
+            return build_index(config, vault_config)
+
+
+@pytest.fixture
+def incremental_vault(tmp_path):
+    """A vault with one note, plus its AppConfig."""
+    vault_dir = tmp_path / "vault"
+    vault_dir.mkdir()
+    (vault_dir / "note.md").write_text(
+        "# Original\n\nOriginal content with enough text to form a valid chunk easily."
+    )
+    config = AppConfig.model_validate(
+        {"vaults": [{"name": "test-vault", "path": str(vault_dir)}]}
+    )
+    return vault_dir, config
+
+
+def test_build_index_modified_file_replaces_chunks(incremental_vault, tmp_path):
+    """Re-indexing a modified file must replace its chunks, not duplicate them."""
+    vault_dir, config = incremental_vault
+    vault_config = config.vaults[0]
+
+    index1, metadata1, _ = _build_with_mocked_ollama(tmp_path, config, vault_config)
+    original_count = index1.ntotal
+
+    (vault_dir / "note.md").write_text(
+        "# Updated\n\nTotally new content replacing the original text of this note."
+    )
+    index2, metadata2, _ = _build_with_mocked_ollama(tmp_path, config, vault_config)
+
+    assert index2.ntotal == original_count, "Old chunks must be removed, not duplicated"
+    assert len(metadata2) == len(metadata1)
+    texts = [m["text"] for m in metadata2.values()]
+    assert not any("Original content" in t for t in texts), "Stale chunk text lingers"
+    assert any("Totally new content" in t for t in texts)
+
+
+def test_build_index_removes_deleted_files(incremental_vault, tmp_path):
+    """Chunks, metadata, and hashes of a deleted note disappear on rebuild."""
+    vault_dir, config = incremental_vault
+    vault_config = config.vaults[0]
+
+    _build_with_mocked_ollama(tmp_path, config, vault_config)
+    (vault_dir / "note.md").unlink()
+    index2, metadata2, hashes2 = _build_with_mocked_ollama(tmp_path, config, vault_config)
+
+    assert index2.ntotal == 0
+    assert metadata2 == {}
+    assert "note.md" not in hashes2
+
+
+def test_build_index_noop_when_unchanged(incremental_vault, tmp_path):
+    """Rebuilding an unchanged vault keeps the same chunks and re-embeds nothing."""
+    vault_dir, config = incremental_vault
+    vault_config = config.vaults[0]
+
+    index1, metadata1, hashes1 = _build_with_mocked_ollama(tmp_path, config, vault_config)
+
+    with patch("obsidian_rag.indexer.ollama_client.Client") as mock_cls:
+        with patch("obsidian_rag.indexer.Path.home", return_value=tmp_path):
+            index2, metadata2, hashes2 = build_index(config, vault_config)
+        mock_cls.return_value.embed.assert_not_called()
+
+    assert index2.ntotal == index1.ntotal
+    assert metadata2 == metadata1
+    assert hashes2 == hashes1
+
+
+def test_load_index_corrupt_files_returns_empty(tmp_path):
+    """Corrupt persisted files fall back to (None, {}, {}) instead of raising."""
+    vault_dir = tmp_path / "storage"
+    vault_dir.mkdir()
+    (vault_dir / "index.faiss").write_bytes(b"not a faiss index")
+    (vault_dir / "metadata.json").write_text("{not valid json")
+    (vault_dir / "file_hashes.json").write_text("{}")
+
+    index, metadata, hashes = load_index(vault_dir)
+
+    assert index is None
+    assert metadata == {}
+    assert hashes == {}
+
+
+def test_find_changed_files_returns_current_hashes(tmp_path):
+    """current_hashes covers every scanned file so callers need not re-hash."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    note = vault / "a.md"
+    note.write_text("# A\nContent")
+
+    to_reindex, deleted, current_hashes = find_changed_files(vault, [note], stored_hashes={})
+
+    assert current_hashes == {"a.md": sha256_file(note)}
