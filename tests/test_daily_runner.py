@@ -466,3 +466,32 @@ def test_format_tag_none_disables_scan(tmp_path: Path) -> None:
 
     assert summary["enqueued"] == 0
     assert "#!format" in note.read_text(encoding="utf-8")
+
+
+def test_strip_failure_does_not_abort_run(tmp_path: Path, caplog) -> None:
+    """A note that cannot be stripped (vanished, perms) warns and the run
+    continues: every other note is still enqueued and formatted."""
+    import logging
+    from unittest.mock import patch as mock_patch
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "a draft.md").write_text(TAGGED_NOTE, encoding="utf-8")
+    (vault / "b idea.md").write_text(TAGGED_NOTE, encoding="utf-8")
+    cfg = _make_cfg(vault)
+    client = _client_with_replies(
+        _reply(["draft"], "## Draft\nbody"), _reply(["idea"], "## Idea\nbody")
+    )
+
+    with (
+        mock_patch(
+            "obsidian_rag.daily_format.runner.strip_format_tag",
+            side_effect=[OSError("vanished"), None],
+        ),
+        caplog.at_level(logging.WARNING, logger="obsidian_rag.daily_format.runner"),
+    ):
+        summary = _run(cfg, tmp_path / "queue.json", client=client)
+
+    assert summary["enqueued"] == 2
+    assert summary["formatted"] == 2
+    assert any("a draft.md" in record.message for record in caplog.records)

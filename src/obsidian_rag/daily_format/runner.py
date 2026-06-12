@@ -161,7 +161,7 @@ def _enqueue_tagged(cfg: AppConfig, queue: FormatQueue, *, dry_run: bool) -> int
                     daily.format_tag,
                 )
                 if not dry_run:
-                    strip_format_tag(path, daily.format_tag)
+                    _strip_tag_safely(path, daily.format_tag)
                 continue
             item = QueueItem(
                 vault=vault.name, rel_path=rel_path, note_date=None, kind="tagged"
@@ -169,8 +169,21 @@ def _enqueue_tagged(cfg: AppConfig, queue: FormatQueue, *, dry_run: bool) -> int
             if queue.enqueue(item):
                 enqueued += 1
             if not dry_run:
-                strip_format_tag(path, daily.format_tag)
+                _strip_tag_safely(path, daily.format_tag)
     return enqueued
+
+
+def _strip_tag_safely(path: Path, format_tag: str) -> None:
+    """Strip the marker, never letting one note's I/O failure abort the run.
+
+    The note may vanish or change permissions between scan and strip; the
+    queued item already carries the request, and a marker left behind is
+    simply re-found (and deduped) on the next run.
+    """
+    try:
+        strip_format_tag(path, format_tag)
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning("Could not strip %s from %s: %s", format_tag, path, exc)
 
 
 def _drain(
