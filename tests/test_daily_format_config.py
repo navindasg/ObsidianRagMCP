@@ -214,3 +214,10 @@ def test_daily_format_package_importable():
     import obsidian_rag.daily_format as pkg
 
     assert pkg.__doc__
+
+
+def test_poll_minutes_default_and_validation():
+    """poll_minutes defaults to 5 and must be positive."""
+    assert DailyFormatConfig().poll_minutes == 5
+    with pytest.raises(ValidationError):
+        DailyFormatConfig(poll_minutes=0)

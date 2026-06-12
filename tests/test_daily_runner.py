@@ -71,6 +71,8 @@ def _run(
     client: MagicMock | None = None,
     today: datetime.date = TODAY,
     dry_run: bool = False,
+    tags_only: bool = False,
+    since: datetime.date | None = None,
     select_model_error: Exception | None = None,
 ) -> dict:
     """Invoke run_format_daily with ollama and select_model mocked out.
@@ -94,7 +96,14 @@ def _run(
         patch("obsidian_rag.daily_format.runner.ollama", mock_ollama),
         patch("obsidian_rag.daily_format.runner.select_model", **select_kwargs),
     ):
-        return run_format_daily(cfg, queue_path=queue_path, today=today, dry_run=dry_run)
+        return run_format_daily(
+            cfg,
+            queue_path=queue_path,
+            today=today,
+            dry_run=dry_run,
+            tags_only=tags_only,
+            since=since,
+        )
 
 
 def _seed_queue(queue_path: Path, *items: QueueItem) -> None:
@@ -495,3 +504,98 @@ def test_strip_failure_does_not_abort_run(tmp_path: Path, caplog) -> None:
     assert summary["enqueued"] == 2
     assert summary["formatted"] == 2
     assert any("a draft.md" in record.message for record in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Tests 18-20: --tags-only poll mode and --since backfill
+# ---------------------------------------------------------------------------
+
+
+def test_tags_only_formats_tagged_but_leaves_dailies(tmp_path: Path) -> None:
+    """tags_only drains tagged notes now; dailies wait for the nightly run."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    daily = vault / "2026-06-11.md"
+    daily.write_text(RAW_NOTE, encoding="utf-8")
+    tagged = vault / "draft.md"
+    tagged.write_text(TAGGED_NOTE, encoding="utf-8")
+    cfg = _make_cfg(vault)
+    client = _client_with_replies(_reply(["draft"], "## Draft\nbody"))
+
+    summary = _run(cfg, tmp_path / "queue.json", client=client, tags_only=True)
+
+    assert summary["enqueued"] == 1
+    assert summary["formatted"] == 1
+    assert "## Original Notes" in tagged.read_text(encoding="utf-8")
+    # The eligible daily was neither enqueued nor formatted.
+    assert daily.read_text(encoding="utf-8") == RAW_NOTE
+
+
+def test_tags_only_without_tags_never_touches_ollama(tmp_path: Path) -> None:
+    """A poll with nothing tagged exits without constructing a client."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "2026-06-11.md").write_text(RAW_NOTE, encoding="utf-8")
+    cfg = _make_cfg(vault)
+
+    # client=None asserts if ollama.Client is ever constructed.
+    summary = _run(cfg, tmp_path / "queue.json", tags_only=True)
+
+    assert summary["formatted"] == 0
+
+
+def test_tags_only_leaves_queued_daily_items_untouched(tmp_path: Path) -> None:
+    """Daily items already in the queue are not drained by a tag poll."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "2026-06-11.md").write_text(RAW_NOTE, encoding="utf-8")
+    cfg = _make_cfg(vault)
+    queue_path = tmp_path / "queue.json"
+    _seed_queue(
+        queue_path,
+        QueueItem(vault="vault", rel_path="2026-06-11.md", note_date="2026-06-11"),
+    )
+
+    summary = _run(cfg, queue_path, tags_only=True)
+
+    assert summary["formatted"] == 0
+    state = json.loads(queue_path.read_text(encoding="utf-8"))
+    assert [item["rel_path"] for item in state["items"]] == ["2026-06-11.md"]
+
+
+def test_since_backfills_past_start_date_and_catchup(tmp_path: Path) -> None:
+    """--since formats notes older than both start_date and catchup_days."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    old = vault / "2026-03-20.md"  # before START (06-01) and outside catchup 14
+    old.write_text(RAW_NOTE, encoding="utf-8")
+    cfg = _make_cfg(vault)
+    client = _client_with_replies(_reply(["notes"], "## Notes\nbody"))
+
+    summary = _run(
+        cfg,
+        tmp_path / "queue.json",
+        client=client,
+        since=datetime.date(2026, 3, 19),
+    )
+
+    assert summary["enqueued"] == 1
+    assert summary["formatted"] == 1
+    assert "## Original Notes" in old.read_text(encoding="utf-8")
+
+
+def test_since_still_respects_blacklist_and_next_day(tmp_path: Path) -> None:
+    """A backfill never touches blacklisted notes or today's note."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "2026-06-10.md").write_text(RAW_NOTE, encoding="utf-8")
+    today_note = vault / "2026-06-12.md"
+    today_note.write_text(RAW_NOTE, encoding="utf-8")
+    cfg = _make_cfg(vault, blacklist=["2026-06-10"])
+
+    summary = _run(
+        cfg, tmp_path / "queue.json", dry_run=True, since=datetime.date(2026, 3, 19)
+    )
+
+    assert summary["enqueued"] == 0
+    assert summary["pending"] == []

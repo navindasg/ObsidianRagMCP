@@ -55,6 +55,10 @@ def test_label_and_plist_path(fake_home: Path) -> None:
     assert launchd.plist_path() == (
         fake_home / "Library" / "LaunchAgents" / "com.obsidian-rag.daily-format.plist"
     )
+    assert launchd.POLL_LABEL == "com.obsidian-rag.format-tag-poll"
+    assert launchd.poll_plist_path() == (
+        fake_home / "Library" / "LaunchAgents" / "com.obsidian-rag.format-tag-poll.plist"
+    )
 
 
 def test_generate_plist_contents(tmp_path: Path) -> None:
@@ -76,12 +80,38 @@ def test_generate_plist_contents(tmp_path: Path) -> None:
     assert payload["RunAtLoad"] is False
 
 
+def test_generate_poll_plist_contents(tmp_path: Path) -> None:
+    """The tag-poll agent is a low-priority background interval job."""
+    log_path = tmp_path / "logs" / "tag-poll.log"
+
+    xml = launchd.generate_poll_plist(5, log_path)
+
+    payload = plistlib.loads(xml.encode("utf-8"))
+    assert payload["Label"] == launchd.POLL_LABEL
+    assert payload["ProgramArguments"] == [
+        sys.executable,
+        "-m",
+        "obsidian_rag",
+        "format-daily",
+        "--tags-only",
+    ]
+    assert payload["StartInterval"] == 300  # 5 minutes
+    # Non-invasive: background process type, niced, low-priority IO.
+    assert payload["ProcessType"] == "Background"
+    assert payload["Nice"] == 10
+    assert payload["LowPriorityBackgroundIO"] is True
+    # Catch up promptly after login/boot.
+    assert payload["RunAtLoad"] is True
+    assert payload["StandardOutPath"] == str(log_path)
+    assert payload["StandardErrorPath"] == str(log_path)
+
+
 # ---------------------------------------------------------------------------
 # Test 3: install happy path (bootout failure is ignored)
 # ---------------------------------------------------------------------------
 
 
-def test_install_writes_plist_and_bootstraps(fake_home: Path) -> None:
+def test_install_writes_plists_and_bootstraps_both(fake_home: Path) -> None:
     cfg = _make_cfg(fake_home, hour=3, minute=5)
     calls: list[list[str]] = []
 
@@ -94,17 +124,21 @@ def test_install_writes_plist_and_bootstraps(fake_home: Path) -> None:
     with patch(
         "obsidian_rag.daily_format.launchd.subprocess.run", side_effect=fake_run
     ):
-        path = launchd.install(cfg)
+        paths = launchd.install(cfg)
 
-    assert path == launchd.plist_path()
-    payload = plistlib.loads(path.read_bytes())
-    assert payload["StartCalendarInterval"] == {"Hour": 3, "Minute": 5}
-    log_path = Path(payload["StandardOutPath"])
+    assert paths == [launchd.plist_path(), launchd.poll_plist_path()]
+    nightly = plistlib.loads(paths[0].read_bytes())
+    assert nightly["StartCalendarInterval"] == {"Hour": 3, "Minute": 5}
+    log_path = Path(nightly["StandardOutPath"])
     assert log_path == fake_home / ".obsidian-rag" / "logs" / "daily-format.log"
     assert log_path.parent.is_dir()
+    poll = plistlib.loads(paths[1].read_bytes())
+    assert poll["StartInterval"] == 5 * 60  # default poll_minutes=5
     assert calls == [
         ["launchctl", "bootout", f"{DOMAIN}/{launchd.LABEL}"],
-        ["launchctl", "bootstrap", DOMAIN, str(path)],
+        ["launchctl", "bootstrap", DOMAIN, str(paths[0])],
+        ["launchctl", "bootout", f"{DOMAIN}/{launchd.POLL_LABEL}"],
+        ["launchctl", "bootstrap", DOMAIN, str(paths[1])],
     ]
 
 
@@ -133,10 +167,12 @@ def test_install_bootstrap_failure_raises_system_exit(fake_home: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_uninstall_bootouts_and_removes_plist(fake_home: Path) -> None:
-    plist = launchd.plist_path()
-    plist.parent.mkdir(parents=True, exist_ok=True)
-    plist.write_text("placeholder", encoding="utf-8")
+def test_uninstall_bootouts_and_removes_both_plists(fake_home: Path) -> None:
+    nightly = launchd.plist_path()
+    poll = launchd.poll_plist_path()
+    nightly.parent.mkdir(parents=True, exist_ok=True)
+    nightly.write_text("placeholder", encoding="utf-8")
+    poll.write_text("placeholder", encoding="utf-8")
     calls: list[list[str]] = []
 
     def fake_run(argv: list[str], **kwargs: Any) -> MagicMock:
@@ -147,10 +183,14 @@ def test_uninstall_bootouts_and_removes_plist(fake_home: Path) -> None:
         "obsidian_rag.daily_format.launchd.subprocess.run", side_effect=fake_run
     ):
         launchd.uninstall()
-        launchd.uninstall()  # missing plist must not raise
+        launchd.uninstall()  # missing plists must not raise
 
-    assert not plist.exists()
-    assert calls == [["launchctl", "bootout", f"{DOMAIN}/{launchd.LABEL}"]] * 2
+    assert not nightly.exists()
+    assert not poll.exists()
+    assert calls == [
+        ["launchctl", "bootout", f"{DOMAIN}/{launchd.LABEL}"],
+        ["launchctl", "bootout", f"{DOMAIN}/{launchd.POLL_LABEL}"],
+    ] * 2
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +198,7 @@ def test_uninstall_bootouts_and_removes_plist(fake_home: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_status_returns_launchctl_output() -> None:
+def test_status_covers_both_agents() -> None:
     calls: list[list[str]] = []
 
     def fake_run(argv: list[str], **kwargs: Any) -> MagicMock:
@@ -170,8 +210,11 @@ def test_status_returns_launchctl_output() -> None:
     ):
         out = launchd.status()
 
-    assert out == "state = waiting\n"
-    assert calls == [["launchctl", "print", f"{DOMAIN}/{launchd.LABEL}"]]
+    assert "state = waiting" in out
+    assert calls == [
+        ["launchctl", "print", f"{DOMAIN}/{launchd.LABEL}"],
+        ["launchctl", "print", f"{DOMAIN}/{launchd.POLL_LABEL}"],
+    ]
 
 
 def test_status_not_installed() -> None:
@@ -183,3 +226,4 @@ def test_status_not_installed() -> None:
 
     assert "not installed" in out
     assert launchd.LABEL in out
+    assert launchd.POLL_LABEL in out

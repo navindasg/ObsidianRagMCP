@@ -81,15 +81,15 @@ def cli(ctx, config_path, vault_path, vault_name, ollama_url, verbose, debug):
     run_server(cfg)
 
 
-def _parse_override_date(date_str: str | None) -> datetime.date | None:
-    """Parse the --date override, exiting politely on bad input."""
+def _parse_override_date(date_str: str | None, flag: str) -> datetime.date | None:
+    """Parse a date-valued flag, exiting politely on bad input."""
     if date_str is None:
         return None
     try:
         return datetime.date.fromisoformat(date_str)
     except ValueError:
         raise SystemExit(
-            f"Invalid --date '{date_str}': expected YYYY-MM-DD"
+            f"Invalid {flag} '{date_str}': expected YYYY-MM-DD"
         ) from None
 
 
@@ -108,8 +108,33 @@ def _parse_override_date(date_str: str | None) -> datetime.date | None:
     metavar="YYYY-MM-DD",
     help="Override today's date (for testing)",
 )
-def format_daily(config_path: str, dry_run: bool, date_str: str | None) -> None:
-    """Format yesterday's (and queued) raw daily notes via Ollama."""
+@click.option(
+    "--tags-only",
+    is_flag=True,
+    default=False,
+    help="Only pick up format-tagged notes (used by the background poll)",
+)
+@click.option(
+    "--since",
+    "since_str",
+    default=None,
+    metavar="YYYY-MM-DD",
+    help="Backfill: format daily notes from this date on, ignoring "
+    "start_date and the catch-up window",
+)
+def format_daily(
+    config_path: str,
+    dry_run: bool,
+    date_str: str | None,
+    tags_only: bool,
+    since_str: str | None,
+) -> None:
+    """Format raw daily notes (and format-tagged notes) via Ollama."""
+    if tags_only and since_str is not None:
+        raise SystemExit(
+            "--since backfills daily notes; --tags-only skips them. "
+            "Use one or the other."
+        )
     cfg = load_config(config_path)
     if not cfg.daily_format.enabled:
         raise SystemExit(
@@ -117,8 +142,11 @@ def format_daily(config_path: str, dry_run: bool, date_str: str | None) -> None:
             "Fix: enable daily_format in config "
             "(set daily_format.enabled: true)"
         )
-    today = _parse_override_date(date_str)
-    summary = run_format_daily(cfg, today=today, dry_run=dry_run)
+    today = _parse_override_date(date_str, "--date")
+    since = _parse_override_date(since_str, "--since")
+    summary = run_format_daily(
+        cfg, today=today, dry_run=dry_run, tags_only=tags_only, since=since
+    )
     rendered = " ".join(f"{key}={value}" for key, value in summary.items())
     click.echo(f"format-daily: {rendered}", err=True)
     sys.exit(1 if summary.get("failed", 0) > 0 else 0)
@@ -132,14 +160,20 @@ def schedule() -> None:
 @schedule.command("install")
 @click.option("--config", "config_path", **_CONFIG_OPTION_KWARGS)
 def schedule_install(config_path: str) -> None:
-    """Install (or reinstall) the nightly LaunchAgent."""
+    """Install (or reinstall) the nightly and tag-poll LaunchAgents."""
     cfg = load_config(config_path)
-    plist = launchd.install(cfg)
+    plists = launchd.install(cfg)
     daily = cfg.daily_format
-    click.echo(f"Installed LaunchAgent: {plist}", err=True)
+    for plist in plists:
+        click.echo(f"Installed LaunchAgent: {plist}", err=True)
     click.echo(
-        f"Next run: daily at {daily.schedule_hour:02d}:{daily.schedule_minute:02d} "
+        f"Nightly run: daily at {daily.schedule_hour:02d}:{daily.schedule_minute:02d} "
         "(launchd fires missed runs on wake)",
+        err=True,
+    )
+    click.echo(
+        f"Tag poll: every {daily.poll_minutes} min in the background "
+        "(low priority, picks up #!format tags)",
         err=True,
     )
 

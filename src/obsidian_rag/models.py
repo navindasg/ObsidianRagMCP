@@ -97,6 +97,8 @@ class DailyFormatConfig(BaseModel):
     blacklist: list[str] = Field(default_factory=list)
     # Marker that opts any note in to the next formatting run; null disables.
     format_tag: str | None = Field(default="#!format", min_length=1)
+    # How often the background agent polls for format tags, in minutes.
+    poll_minutes: int = Field(default=5, gt=0)
 
 
 class AppConfig(BaseModel):

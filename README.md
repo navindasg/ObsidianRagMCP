@@ -183,6 +183,7 @@ daily_format:
   max_retries: 3                 # Attempts per note before it is parked in the queue
   blacklist: []                  # Notes never formatted (stems or relative paths, .md optional)
   format_tag: "#!format"         # Marker that opts any note in to the next run (null disables)
+  poll_minutes: 5                # Background tag-poll interval in minutes
 ```
 
 ### Section descriptions
@@ -275,19 +276,26 @@ Type the `format_tag` marker (default `#!format`) anywhere in a note — daily o
 obsidian-rag format-daily              # one formatting pass now
 obsidian-rag format-daily --dry-run    # enqueue and report; never calls Ollama or rewrites notes
 obsidian-rag format-daily --date 2026-06-12   # override "today" (for testing)
+obsidian-rag format-daily --since 2026-03-19  # deliberate backfill from a date
+obsidian-rag format-daily --tags-only  # only pick up format-tagged notes (used by the poll agent)
 ```
 
 `format-daily` exits non-zero if any note failed to format. Failed notes stay in the queue and are retried on the next run, up to `max_retries` attempts each, after which they are parked.
 
+`--since` is the deliberate backfill escape hatch: it overrides `start_date` and the catch-up window so every daily note from that date on becomes eligible. The blacklist and next-day rule still apply.
+
 ### Scheduling (macOS launchd)
 
 ```bash
-obsidian-rag schedule install      # install (or reinstall) the nightly LaunchAgent
-obsidian-rag schedule status       # show launchd's view of the agent
-obsidian-rag schedule uninstall    # remove the agent
+obsidian-rag schedule install      # install (or reinstall) both LaunchAgents
+obsidian-rag schedule status       # show launchd's view of both agents
+obsidian-rag schedule uninstall    # remove both agents
 ```
 
-`schedule install` writes `~/Library/LaunchAgents/com.obsidian-rag.daily-format.plist`, which runs `format-daily` every night at `schedule_hour:schedule_minute` (default 00:30). If the machine is asleep at the scheduled time, launchd fires the missed run when it wakes — no run is ever silently dropped. The agent's output is appended to `~/.obsidian-rag/logs/daily-format.log`.
+`schedule install` writes two agents to `~/Library/LaunchAgents/`:
+
+- **`com.obsidian-rag.daily-format.plist`** runs `format-daily` every night at `schedule_hour:schedule_minute` (default 00:30). If the machine is asleep at the scheduled time, launchd fires the missed run when it wakes. Runs missed while powered off are not replayed at boot, but the catch-up window makes the next run pick up the backlog. Output goes to `~/.obsidian-rag/logs/daily-format.log`.
+- **`com.obsidian-rag.format-tag-poll.plist`** runs `format-daily --tags-only` every `poll_minutes` (default 5) so format tags are picked up promptly instead of waiting for the nightly run. It is deliberately non-invasive: launchd marks it `ProcessType: Background` with `Nice 10` and low-priority IO, a poll that finds nothing exits without touching Ollama, and it runs once at login to catch tags dropped while the machine was off. Output goes to `~/.obsidian-rag/logs/tag-poll.log`.
 
 ### The persistent queue
 
@@ -332,10 +340,12 @@ obsidian-rag format-daily [OPTIONS]
   --config PATH       Path to config file (default: ~/.obsidian-rag/config.yaml)
   --dry-run           Enqueue and report, but do not call Ollama or rewrite notes
   --date YYYY-MM-DD   Override today's date (for testing)
+  --since YYYY-MM-DD  Backfill daily notes from this date, ignoring start_date/catch-up
+  --tags-only         Only pick up format-tagged notes (used by the poll agent)
 
-obsidian-rag schedule install   [--config PATH]   Install (or reinstall) the nightly LaunchAgent
-obsidian-rag schedule uninstall [--config PATH]   Remove the nightly LaunchAgent
-obsidian-rag schedule status    [--config PATH]   Show the LaunchAgent's launchd status
+obsidian-rag schedule install   [--config PATH]   Install (or reinstall) both LaunchAgents
+obsidian-rag schedule uninstall [--config PATH]   Remove both LaunchAgents
+obsidian-rag schedule status    [--config PATH]   Show both agents' launchd status
 ```
 
 `format-daily` exits with status 1 when any note failed to format. All logs

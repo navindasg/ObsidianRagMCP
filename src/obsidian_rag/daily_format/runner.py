@@ -38,8 +38,10 @@ def run_format_daily(
     queue_path: Path | None = None,
     today: datetime.date | None = None,
     dry_run: bool = False,
+    tags_only: bool = False,
+    since: datetime.date | None = None,
 ) -> dict:
-    """Run one nightly formatting pass: enqueue candidates, then drain.
+    """Run one formatting pass: enqueue candidates, then drain.
 
     Args:
         cfg: Validated application config (daily_format section drives this).
@@ -47,6 +49,12 @@ def run_format_daily(
         today: Current date override for testing; defaults to date.today().
         dry_run: When True, enqueue and report but never touch Ollama or
             rewrite any note (the queue itself is still persisted).
+        tags_only: When True (the background poll), skip the daily-note
+            scan and drain only tagged items; queued daily items wait for
+            the nightly run.
+        since: Deliberate backfill — overrides both start_date and the
+            catch-up window so every daily note dated on or after this date
+            becomes eligible. The blacklist and next-day rule still apply.
 
     Returns:
         Summary counts. Normal runs: {"enqueued", "formatted", "failed",
@@ -56,12 +64,23 @@ def run_format_daily(
     """
     today = today if today is not None else datetime.date.today()
     queue = FormatQueue.load(queue_path if queue_path is not None else default_queue_path())
-    start_date = cfg.daily_format.start_date or queue.ensure_start_date(today)
+    if since is not None:
+        start_date = since
+        catchup_days = max((today - since).days, 1)
+    else:
+        start_date = cfg.daily_format.start_date or queue.ensure_start_date(today)
+        catchup_days = cfg.daily_format.catchup_days
 
-    enqueued = _enqueue_candidates(cfg, queue, today=today, start_date=start_date)
+    enqueued = 0
+    if not tags_only:
+        enqueued += _enqueue_candidates(
+            cfg, queue, today=today, start_date=start_date, catchup_days=catchup_days
+        )
     enqueued += _enqueue_tagged(cfg, queue, dry_run=dry_run)
     queue.save()
     pending = queue.pending(cfg.daily_format.max_retries)
+    if tags_only:
+        pending = [item for item in pending if item.kind == "tagged"]
 
     if dry_run:
         return {
@@ -100,6 +119,7 @@ def _enqueue_candidates(
     *,
     today: datetime.date,
     start_date: datetime.date,
+    catchup_days: int,
 ) -> int:
     """Scan every vault for eligible raw daily notes and enqueue them."""
     daily = cfg.daily_format
@@ -111,7 +131,7 @@ def _enqueue_candidates(
             filename_format=daily.filename_format,
             today=today,
             start_date=start_date,
-            catchup_days=daily.catchup_days,
+            catchup_days=catchup_days,
             excluded_dirs=vault.excluded_dirs,
             excluded_patterns=vault.excluded_patterns,
             blacklist=daily.blacklist,

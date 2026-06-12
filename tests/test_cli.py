@@ -272,7 +272,10 @@ def test_schedule_install_prints_plist_path_and_next_run(daily_config_file):
     runner = CliRunner()
     with patch(
         "obsidian_rag.cli.launchd.install",
-        return_value=Path("/fake/LaunchAgents/com.obsidian-rag.daily-format.plist"),
+        return_value=[
+            Path("/fake/LaunchAgents/com.obsidian-rag.daily-format.plist"),
+            Path("/fake/LaunchAgents/com.obsidian-rag.format-tag-poll.plist"),
+        ],
     ) as mock_install:
         result = runner.invoke(
             cli, ["schedule", "install", "--config", str(daily_config_file)]
@@ -283,7 +286,9 @@ def test_schedule_install_prints_plist_path_and_next_run(daily_config_file):
     cfg = mock_install.call_args.args[0]
     assert cfg.daily_format.enabled is True
     assert "com.obsidian-rag.daily-format.plist" in result.stderr
+    assert "com.obsidian-rag.format-tag-poll.plist" in result.stderr
     assert "00:30" in result.stderr  # default schedule_hour=0, schedule_minute=30
+    assert "5 min" in result.stderr  # default poll_minutes=5
 
 
 def test_schedule_uninstall_delegates(daily_config_file):
@@ -311,3 +316,65 @@ def test_schedule_status_prints_status(daily_config_file):
     assert result.exit_code == 0, result.output
     mock_status.assert_called_once_with()
     assert "state = waiting" in result.stderr
+
+
+def test_format_daily_passes_tags_only_and_since(daily_config_file):
+    """--tags-only and --since are forwarded to run_format_daily."""
+    summary = {"enqueued": 0, "formatted": 0, "failed": 0, "skipped": 0}
+    runner = CliRunner()
+    with patch("obsidian_rag.cli.run_format_daily", return_value=summary) as mock_run:
+        result = runner.invoke(
+            cli,
+            ["format-daily", "--config", str(daily_config_file), "--tags-only"],
+        )
+    assert result.exit_code == 0, result.output
+    assert mock_run.call_args.kwargs["tags_only"] is True
+
+    with patch("obsidian_rag.cli.run_format_daily", return_value=summary) as mock_run:
+        result = runner.invoke(
+            cli,
+            [
+                "format-daily",
+                "--config",
+                str(daily_config_file),
+                "--since",
+                "2026-03-19",
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    assert mock_run.call_args.kwargs["since"] == datetime.date(2026, 3, 19)
+
+
+def test_format_daily_rejects_bad_since(daily_config_file):
+    """An unparseable --since exits non-zero with a helpful message."""
+    runner = CliRunner()
+    with patch("obsidian_rag.cli.run_format_daily") as mock_run:
+        result = runner.invoke(
+            cli,
+            ["format-daily", "--config", str(daily_config_file), "--since", "junk"],
+        )
+
+    assert result.exit_code != 0
+    assert "YYYY-MM-DD" in result.output
+    mock_run.assert_not_called()
+
+
+def test_format_daily_since_conflicts_with_tags_only(daily_config_file):
+    """--since (backfill dailies) and --tags-only are mutually exclusive."""
+    runner = CliRunner()
+    with patch("obsidian_rag.cli.run_format_daily") as mock_run:
+        result = runner.invoke(
+            cli,
+            [
+                "format-daily",
+                "--config",
+                str(daily_config_file),
+                "--since",
+                "2026-03-19",
+                "--tags-only",
+            ],
+        )
+
+    assert result.exit_code != 0
+    assert "--since" in result.output and "--tags-only" in result.output
+    mock_run.assert_not_called()

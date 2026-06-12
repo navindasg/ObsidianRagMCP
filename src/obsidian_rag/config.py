@@ -58,6 +58,7 @@ vaults:
 #   max_retries: 3
 #   blacklist: []
 #   format_tag: "#!format"
+#   poll_minutes: 5
 """
 
 
