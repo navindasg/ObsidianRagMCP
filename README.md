@@ -29,16 +29,20 @@ A local MCP server that gives Claude Desktop semantic search and file access ove
 
 ## Installation
 
+Install from source:
+
 ```bash
-pip install obsidian-rag
+git clone https://github.com/navindasg/ObsidianRagMCP.git
+cd ObsidianRagMCP
+pip install .
 ```
 
 For development (editable install with dev dependencies):
 
 ```bash
-git clone https://github.com/user/obsidian-rag.git
-cd obsidian-rag
 pip install -e ".[dev]"
+# or, with uv (a uv.lock is checked in):
+uv sync
 ```
 
 ---
@@ -54,6 +58,10 @@ vaults:
   - name: my-vault
     path: ~/Documents/ObsidianVault
 ```
+
+Alternatively, run `python -m obsidian_rag` once — when no config exists it
+generates a commented default at `~/.obsidian-rag/config.yaml` and exits with
+instructions to edit it.
 
 ### 2. Verify the server starts
 
@@ -133,7 +141,7 @@ vaults:
 embedding:
   model: nomic-embed-text        # Ollama model name for embeddings
   ollama_url: http://localhost:11434
-  batch_size: 64                 # Notes embedded per Ollama request
+  batch_size: 64                 # Chunks embedded per Ollama request
 
 indexing:
   chunk_strategy: heading        # "heading" (default) or "fixed"
@@ -149,7 +157,7 @@ retrieval:
 
 rerank:
   enabled: false                 # Set true to enable LLM reranking
-  model: llama3.2                # Ollama model used for reranking
+  model: null                    # Reranking model (defaults to llama3.2 when enabled)
   top_n: 20                      # Candidates fetched from FAISS before reranking
 
 tools:
@@ -211,7 +219,7 @@ When using the `search` tool without a `vault_name` argument, results are merged
 
 **`search`** returns `{"results": [...]}` where each result has `source_path`, `heading_path`, `relevance_score` (0.0–1.0), `snippet`, and `vault_name`.
 
-**`read_note`** returns `{"path": "...", "content": "...", "frontmatter": {...}}` on success, or `{"error": "...", "suggestion": "..."}` on failure.
+**`read_note`** returns `{"path": "...", "content": "...", "frontmatter": {...}}` on success, or `{"error": "...", "suggestion": "..."}` on failure. Only `.md` files inside the vault (and outside `excluded_dirs`) are accessible; the same applies to `note_context`.
 
 **`list_notes`** returns `{"notes": [...]}` where each entry has `path`, `size`, `modified` (ISO 8601), and `tag_count`.
 
@@ -219,9 +227,30 @@ When using the `search` tool without a `vault_name` argument, results are merged
 
 **`note_context`** returns `{"note": {path, content}, "forward_links": [{path, exists}], "backlinks": [{source_path, heading_path, snippet}]}`.
 
-**`vault_stats`** returns `{"vaults": [...], "total_notes": N, "total_chunks": N}` where each vault entry includes `vault`, `note_count`, `chunk_count`, `index_age`, and `embedding_model`.
+**`vault_stats`** returns `{"vaults": [...], "total_notes": N, "total_chunks": N}` where each vault entry includes `vault`, `note_count`, `chunk_count`, `index_age`, `embedding_model`, and `last_reindex` (the outcome of the most recent background reindex, or `null`).
 
-**`reindex`** returns `{"status": "started" | "already_running", "vault": "...", "message": "..."}` immediately without blocking.
+**`reindex`** returns `{"status": "started" | "already_running", "vault": "...", "message": "..."}` immediately without blocking. Check `vault_stats.last_reindex` for the outcome.
+
+---
+
+## CLI Reference
+
+The package installs an `obsidian-rag` console script (equivalent to
+`python -m obsidian_rag`):
+
+```
+obsidian-rag [OPTIONS]
+
+  --config PATH       Path to config file (default: ~/.obsidian-rag/config.yaml)
+  --vault-path PATH   Override the first vault's path
+  --vault-name NAME   Override the first vault's name
+  --ollama-url URL    Override the Ollama API URL
+  --verbose           Log at INFO level (shows per-file indexing progress)
+  --debug             Log at DEBUG level
+  --version           Print the version and exit
+```
+
+All logs go to stderr; stdout is reserved for the MCP stdio protocol.
 
 ---
 

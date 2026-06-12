@@ -3,6 +3,7 @@ name = "obsidian-rag"
 version = "0.1.0"
 description = "MCP server for semantic search over Obsidian vaults"
 readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.12"
 dependencies = [
     "fastmcp>=3.1.1",
@@ -15,6 +16,15 @@ dependencies = [
     "numpy>=2.4.3",
     "watchdog>=6.0.0",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-cov>=7.0.0",
+]
+
+[project.urls]
+Repository = "https://github.com/navindasg/ObsidianRagMCP"
 
 [project.scripts]
 obsidian-rag = "obsidian_rag.cli:cli"
