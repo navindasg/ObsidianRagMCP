@@ -45,6 +45,14 @@ def test_defaults():
     assert cfg.start_date is None
     assert cfg.catchup_days == 14
     assert cfg.max_retries == 3
+    assert cfg.blacklist == []
+
+
+def test_blacklist_instances_do_not_share_state():
+    """The blacklist default is a fresh list per instance (default_factory)."""
+    first = DailyFormatConfig()
+    second = DailyFormatConfig()
+    assert first.blacklist is not second.blacklist
 
 
 # ---------------------------------------------------------------------------

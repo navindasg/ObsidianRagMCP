@@ -56,6 +56,7 @@ vaults:
 #   start_date: null
 #   catchup_days: 14
 #   max_retries: 3
+#   blacklist: []
 """
 
 

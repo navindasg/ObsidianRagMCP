@@ -112,6 +112,7 @@ def _enqueue_candidates(
             catchup_days=daily.catchup_days,
             excluded_dirs=vault.excluded_dirs,
             excluded_patterns=vault.excluded_patterns,
+            blacklist=daily.blacklist,
         )
         for path in candidates:
             note_date = parse_note_date(path, daily.filename_format)

@@ -16,6 +16,7 @@ import pytest
 from obsidian_rag.daily_format.detector import (
     find_candidates,
     is_already_formatted,
+    is_blacklisted,
     parse_note_date,
 )
 
@@ -324,3 +325,32 @@ def test_results_sorted_by_date_ascending(tmp_path):
     n08 = _make_note(tmp_path, "2026-06-08.md")
     n11 = _make_note(tmp_path, "2026-06-11.md")
     assert _find(tmp_path) == [n08, n10, n11]
+
+
+# ---------------------------------------------------------------------------
+# is_blacklisted / blacklist in find_candidates
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "entry",
+    ["2026-06-10", "2026-06-10.md", "daily/2026-06-10", "daily/2026-06-10.md"],
+)
+def test_is_blacklisted_matches_stem_and_rel_path_forms(entry):
+    """A blacklist entry matches by stem or relative path, .md optional."""
+    assert is_blacklisted(Path("daily/2026-06-10.md"), [entry])
+
+
+def test_is_blacklisted_no_match():
+    """Unrelated entries and an empty blacklist never match."""
+    rel = Path("daily/2026-06-10.md")
+    assert not is_blacklisted(rel, [])
+    assert not is_blacklisted(rel, ["2026-06-11", "other/2026-06-10.md"])
+
+
+def test_find_candidates_skips_blacklisted_note(tmp_path):
+    """A blacklisted daily note is never a candidate; siblings still are."""
+    _make_note(tmp_path, "2026-06-10.md")
+    kept = _make_note(tmp_path, "2026-06-11.md")
+
+    assert _find(tmp_path, blacklist=["2026-06-10"]) == [kept]

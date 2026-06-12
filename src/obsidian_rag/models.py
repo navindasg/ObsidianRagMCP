@@ -92,6 +92,9 @@ class DailyFormatConfig(BaseModel):
     start_date: datetime.date | None = Field(default=None)
     catchup_days: int = Field(default=14, gt=0)
     max_retries: int = Field(default=3, gt=0)
+    # Notes never formatted: filename stems or vault-relative paths,
+    # the .md suffix optional in either form.
+    blacklist: list[str] = Field(default_factory=list)
 
 
 class AppConfig(BaseModel):

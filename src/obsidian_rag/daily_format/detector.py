@@ -3,9 +3,10 @@
 Public API:
     parse_note_date(path, filename_format) -> datetime.date | None
     is_already_formatted(text) -> bool
+    is_blacklisted(rel_path, blacklist) -> bool
     find_candidates(vault_root, *, daily_folder, filename_format, today,
-        start_date, catchup_days, excluded_dirs, excluded_patterns)
-        -> list[Path]
+        start_date, catchup_days, excluded_dirs, excluded_patterns,
+        blacklist=()) -> list[Path]
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from __future__ import annotations
 import datetime
 import logging
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 import yaml
@@ -105,6 +107,20 @@ def _frontmatter_has_formatted_key(text: str) -> bool:
     return isinstance(frontmatter, dict) and "formatted" in frontmatter
 
 
+def is_blacklisted(rel_path: Path, blacklist: Sequence[str]) -> bool:
+    """Return True when a vault-relative path matches a blacklist entry.
+
+    An entry matches the note's filename stem ("2026-06-10") or its
+    vault-relative path, with the .md suffix optional in either form.
+    Stem entries therefore match any note of that name in any folder.
+    """
+    if not blacklist:
+        return False
+    posix = rel_path.as_posix()
+    forms = {rel_path.stem, rel_path.name, posix, posix.removesuffix(".md")}
+    return any(entry in forms for entry in blacklist)
+
+
 def find_candidates(
     vault_root: Path,
     *,
@@ -115,13 +131,14 @@ def find_candidates(
     catchup_days: int,
     excluded_dirs: list[str],
     excluded_patterns: list[str],
+    blacklist: Sequence[str] = (),
 ) -> list[Path]:
     """Scan the daily folder for raw daily notes that need formatting.
 
     A note is eligible when its stem parses to a date d with
     max(start_date, today - catchup_days) <= d < today, it is not excluded
-    by the vault's exclusion rules, and it is not already formatted.
-    Unreadable files are skipped with a warning.
+    by the vault's exclusion rules, it is not blacklisted, and it is not
+    already formatted. Unreadable files are skipped with a warning.
 
     Args:
         vault_root: Root directory of the Obsidian vault.
@@ -156,6 +173,7 @@ def find_candidates(
         and not is_excluded(
             md_file.relative_to(vault_root), excluded_dirs, excluded_patterns
         )
+        and not is_blacklisted(md_file.relative_to(vault_root), blacklist)
         and _is_readable_raw_note(md_file)
     ]
     return [md_file for _, md_file in sorted(eligible)]

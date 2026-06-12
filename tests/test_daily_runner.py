@@ -355,3 +355,21 @@ def test_item_dated_today_marked_done(vault: Path, queue_path: Path) -> None:
     client.chat.assert_not_called()
     assert (vault / "2026-06-12.md").read_text(encoding="utf-8") == "today raw\n"
     assert FormatQueue.load(queue_path).items == ()
+
+
+# ---------------------------------------------------------------------------
+# Test 12: blacklisted daily note is never enqueued
+# ---------------------------------------------------------------------------
+
+
+def test_blacklisted_note_never_enqueued(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "2026-06-11.md").write_text(RAW_NOTE, encoding="utf-8")
+    (vault / "2026-06-10.md").write_text(RAW_NOTE, encoding="utf-8")
+    cfg = _make_cfg(vault, blacklist=["2026-06-10"])
+
+    summary = _run(cfg, tmp_path / "queue.json", dry_run=True)
+
+    assert summary["enqueued"] == 1
+    assert summary["pending"] == ["2026-06-11.md"]
