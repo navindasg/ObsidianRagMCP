@@ -1,4 +1,5 @@
-"""Tests for CLI flags and config override behavior."""
+"""Tests for CLI flags, config override behavior, and subcommands."""
+import datetime
 import logging
 from pathlib import Path
 from unittest.mock import patch
@@ -17,6 +18,20 @@ def config_file(tmp_path):
     vault_dir.mkdir()
     config = {"vaults": [{"name": "test-vault", "path": str(vault_dir)}]}
     config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump(config), encoding="utf-8")
+    return config_path
+
+
+@pytest.fixture
+def daily_config_file(tmp_path):
+    """Write a config YAML with daily_format enabled to a temp file."""
+    vault_dir = tmp_path / "vault"
+    vault_dir.mkdir(exist_ok=True)
+    config = {
+        "vaults": [{"name": "test-vault", "path": str(vault_dir)}],
+        "daily_format": {"enabled": True},
+    }
+    config_path = tmp_path / "daily-config.yaml"
     config_path.write_text(yaml.dump(config), encoding="utf-8")
     return config_path
 
@@ -136,3 +151,163 @@ def test_python_m_entry_point_runs():
 
     assert result.returncode == 0
     assert "obsidian-rag" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# format-daily subcommand
+# ---------------------------------------------------------------------------
+
+
+def test_help_lists_subcommands():
+    """--help shows the new subcommands."""
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--help"])
+    assert result.exit_code == 0
+    assert "format-daily" in result.output
+    assert "schedule" in result.output
+
+
+def test_subcommand_does_not_start_server(daily_config_file):
+    """Invoking a subcommand never runs the MCP server."""
+    runner = CliRunner()
+    with (
+        patch("obsidian_rag.cli.run_server") as mock_server,
+        patch(
+            "obsidian_rag.cli.run_format_daily",
+            return_value={"enqueued": 0, "formatted": 0, "failed": 0, "skipped": 0},
+        ),
+    ):
+        result = runner.invoke(
+            cli, ["format-daily", "--config", str(daily_config_file)]
+        )
+
+    assert result.exit_code == 0, result.output
+    mock_server.assert_not_called()
+
+
+def test_format_daily_invokes_runner_and_exits_zero(daily_config_file):
+    """format-daily loads config, calls the runner, prints a stderr summary."""
+    summary = {"enqueued": 1, "formatted": 1, "failed": 0, "skipped": 0}
+    runner = CliRunner()
+    with patch("obsidian_rag.cli.run_format_daily", return_value=summary) as mock_run:
+        result = runner.invoke(
+            cli, ["format-daily", "--config", str(daily_config_file)]
+        )
+
+    assert result.exit_code == 0, result.output
+    mock_run.assert_called_once()
+    kwargs = mock_run.call_args.kwargs
+    assert kwargs["dry_run"] is False
+    assert kwargs["today"] is None
+    assert "formatted=1" in result.stderr
+
+
+def test_format_daily_exits_one_on_failures(daily_config_file):
+    """format-daily exits 1 when the summary reports failures."""
+    summary = {"enqueued": 2, "formatted": 0, "failed": 2, "skipped": 0}
+    runner = CliRunner()
+    with patch("obsidian_rag.cli.run_format_daily", return_value=summary):
+        result = runner.invoke(
+            cli, ["format-daily", "--config", str(daily_config_file)]
+        )
+
+    assert result.exit_code == 1
+
+
+def test_format_daily_passes_dry_run_and_date(daily_config_file):
+    """--dry-run and --date are forwarded to run_format_daily."""
+    summary = {"enqueued": 0, "pending": [], "formatted": 0, "failed": 0}
+    runner = CliRunner()
+    with patch("obsidian_rag.cli.run_format_daily", return_value=summary) as mock_run:
+        result = runner.invoke(
+            cli,
+            [
+                "format-daily",
+                "--config",
+                str(daily_config_file),
+                "--dry-run",
+                "--date",
+                "2026-06-12",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    kwargs = mock_run.call_args.kwargs
+    assert kwargs["dry_run"] is True
+    assert kwargs["today"] == datetime.date(2026, 6, 12)
+
+
+def test_format_daily_rejects_bad_date(daily_config_file):
+    """An unparseable --date exits non-zero with a helpful message."""
+    runner = CliRunner()
+    with patch("obsidian_rag.cli.run_format_daily") as mock_run:
+        result = runner.invoke(
+            cli,
+            ["format-daily", "--config", str(daily_config_file), "--date", "junk"],
+        )
+
+    assert result.exit_code != 0
+    assert "YYYY-MM-DD" in result.output
+    mock_run.assert_not_called()
+
+
+def test_format_daily_disabled_config_exits_with_message(config_file):
+    """format-daily refuses to run when daily_format.enabled is false."""
+    runner = CliRunner()
+    with patch("obsidian_rag.cli.run_format_daily") as mock_run:
+        result = runner.invoke(cli, ["format-daily", "--config", str(config_file)])
+
+    assert result.exit_code != 0
+    assert "enable daily_format in config" in result.output
+    mock_run.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# schedule subcommands
+# ---------------------------------------------------------------------------
+
+
+def test_schedule_install_prints_plist_path_and_next_run(daily_config_file):
+    """schedule install delegates to launchd.install and reports to stderr."""
+    runner = CliRunner()
+    with patch(
+        "obsidian_rag.cli.launchd.install",
+        return_value=Path("/fake/LaunchAgents/com.obsidian-rag.daily-format.plist"),
+    ) as mock_install:
+        result = runner.invoke(
+            cli, ["schedule", "install", "--config", str(daily_config_file)]
+        )
+
+    assert result.exit_code == 0, result.output
+    mock_install.assert_called_once()
+    cfg = mock_install.call_args.args[0]
+    assert cfg.daily_format.enabled is True
+    assert "com.obsidian-rag.daily-format.plist" in result.stderr
+    assert "00:30" in result.stderr  # default schedule_hour=0, schedule_minute=30
+
+
+def test_schedule_uninstall_delegates(daily_config_file):
+    """schedule uninstall delegates to launchd.uninstall."""
+    runner = CliRunner()
+    with patch("obsidian_rag.cli.launchd.uninstall") as mock_uninstall:
+        result = runner.invoke(
+            cli, ["schedule", "uninstall", "--config", str(daily_config_file)]
+        )
+
+    assert result.exit_code == 0, result.output
+    mock_uninstall.assert_called_once_with()
+
+
+def test_schedule_status_prints_status(daily_config_file):
+    """schedule status prints launchd.status() output to stderr."""
+    runner = CliRunner()
+    with patch(
+        "obsidian_rag.cli.launchd.status", return_value="state = waiting"
+    ) as mock_status:
+        result = runner.invoke(
+            cli, ["schedule", "status", "--config", str(daily_config_file)]
+        )
+
+    assert result.exit_code == 0, result.output
+    mock_status.assert_called_once_with()
+    assert "state = waiting" in result.stderr
