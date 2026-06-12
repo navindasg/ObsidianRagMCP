@@ -45,6 +45,17 @@ vaults:
 #     - note_context
 #     - vault_stats
 #     - reindex
+
+# daily_format:
+#   enabled: false
+#   daily_folder: ""
+#   filename_format: "%Y-%m-%d"
+#   model: null
+#   schedule_hour: 0
+#   schedule_minute: 30
+#   start_date: null
+#   catchup_days: 14
+#   max_retries: 3
 """
 
 

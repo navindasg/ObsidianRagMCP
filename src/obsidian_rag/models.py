@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -77,6 +78,22 @@ class ToolsConfig(BaseModel):
     )
 
 
+class DailyFormatConfig(BaseModel):
+    """Configuration for the nightly daily-note formatting job."""
+
+    enabled: bool = Field(default=False)
+    daily_folder: str = Field(default="")  # relative to vault root; "" = vault root
+    # strptime pattern matched against the note filename stem.
+    filename_format: str = Field(default="%Y-%m-%d")
+    model: str | None = Field(default=None)  # None = auto-select from pulled models
+    schedule_hour: int = Field(default=0, ge=0, le=23)
+    schedule_minute: int = Field(default=30, ge=0, le=59)
+    # No-backfill cutoff; None = recorded on first run.
+    start_date: datetime.date | None = Field(default=None)
+    catchup_days: int = Field(default=14, gt=0)
+    max_retries: int = Field(default=3, gt=0)
+
+
 class AppConfig(BaseModel):
     vaults: list[VaultConfig]
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
@@ -84,6 +101,7 @@ class AppConfig(BaseModel):
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     rerank: RerankConfig = Field(default_factory=RerankConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    daily_format: DailyFormatConfig = Field(default_factory=DailyFormatConfig)
 
 
 class ChunkMetadata(BaseModel):
