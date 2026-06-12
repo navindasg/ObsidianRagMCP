@@ -72,6 +72,7 @@ def test_generate_plist_contents(tmp_path: Path) -> None:
         sys.executable,
         "-m",
         "obsidian_rag",
+        "--verbose",
         "format-daily",
     ]
     assert payload["StartCalendarInterval"] == {"Hour": 2, "Minute": 45}
@@ -92,6 +93,7 @@ def test_generate_poll_plist_contents(tmp_path: Path) -> None:
         sys.executable,
         "-m",
         "obsidian_rag",
+        "--verbose",
         "format-daily",
         "--tags-only",
     ]

@@ -67,7 +67,14 @@ def generate_plist(
     """Render the nightly LaunchAgent plist XML via plistlib for correctness."""
     payload = {
         "Label": LABEL,
-        "ProgramArguments": [sys.executable, "-m", "obsidian_rag", "format-daily"],
+        # --verbose so per-note progress/timing lands in the log for tailing.
+        "ProgramArguments": [
+            sys.executable,
+            "-m",
+            "obsidian_rag",
+            "--verbose",
+            "format-daily",
+        ],
         "StartCalendarInterval": {"Hour": schedule_hour, "Minute": schedule_minute},
         "StandardOutPath": str(log_path),
         "StandardErrorPath": str(log_path),
@@ -90,6 +97,7 @@ def generate_poll_plist(poll_minutes: int, log_path: Path) -> str:
             sys.executable,
             "-m",
             "obsidian_rag",
+            "--verbose",
             "format-daily",
             "--tags-only",
         ],

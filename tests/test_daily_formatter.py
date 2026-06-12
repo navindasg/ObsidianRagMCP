@@ -438,3 +438,84 @@ def test_model_hallucinated_frontmatter_stripped() -> None:
     assert "sneaky" not in document
     formatted_section = document.split("---\n\n", 1)[1]
     assert formatted_section.startswith("actual formatted body")
+
+
+# ---------------------------------------------------------------------------
+# Thinking models and lenient reply parsing (gemma4-mlx compatibility)
+# ---------------------------------------------------------------------------
+
+
+def test_chat_disables_thinking() -> None:
+    """Thinking models must answer in content, not think forever."""
+    client = _make_client(_json_reply(["work"], "body"))
+
+    format_with_model(client, "gemma4:26b-mlx", "raw", [])
+
+    assert client.chat.call_args.kwargs["think"] is False
+
+
+def test_think_unsupported_retries_without() -> None:
+    """Models without a thinking toggle get a second call sans think."""
+    import ollama as ollama_pkg
+
+    good = MagicMock()
+    good.message.content = _json_reply(["work"], "body")
+    client = MagicMock()
+    client.chat.side_effect = [
+        ollama_pkg.ResponseError('"llama3.2" does not support thinking'),
+        good,
+    ]
+
+    tags, body = format_with_model(client, "llama3.2", "raw", [])
+
+    assert (tags, body) == (["work"], "body")
+    assert client.chat.call_count == 2
+    assert "think" not in client.chat.call_args.kwargs
+
+
+def test_fenced_json_reply_parsed() -> None:
+    """MLX models ignore the schema and fence their JSON; parse it anyway."""
+    fenced = f'```json\n{_json_reply(["work"], "## Body")}\n```'
+    client = _make_client(fenced)
+
+    tags, body = format_with_model(client, "gemma4:26b-mlx", "raw", [])
+
+    assert tags == ["work"]
+    assert body == "## Body"
+
+
+def test_json_with_prose_around_it_parsed() -> None:
+    """Prose before/after the JSON object is tolerated."""
+    reply = f'Here is the JSON you asked for:\n{_json_reply([], "## B")}\nHope it helps!'
+    client = _make_client(reply)
+
+    tags, body = format_with_model(client, "m", "raw", [])
+
+    assert body == "## B"
+
+
+def test_empty_reply_mentions_thinking_budget() -> None:
+    """An empty reply gets a diagnosis, not just 'invalid JSON'."""
+    client = _make_client("")
+
+    with pytest.raises(FormatError, match="empty"):
+        format_with_model(client, "m", "raw", [])
+
+
+def test_format_file_logs_duration(tmp_path: Path, caplog) -> None:
+    """Per-note INFO log carries elapsed seconds for throughput tailing."""
+    import re as re_mod
+
+    note = tmp_path / "2026-06-11.md"
+    note.write_text("raw\n", encoding="utf-8")
+    client = _make_client(_json_reply(["t"], "## B"))
+
+    with caplog.at_level(logging.INFO, logger="obsidian_rag.daily_format.formatter"):
+        format_file(
+            note, client=client, model="m", tag_vocab=[], note_date=NOTE_DATE, now=NOW
+        )
+
+    assert any(
+        re_mod.search(r"Formatted .+ in \d+\.\d+s", record.message)
+        for record in caplog.records
+    )

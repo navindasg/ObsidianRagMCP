@@ -22,13 +22,11 @@ import logging
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+import ollama
 import yaml
-
-if TYPE_CHECKING:
-    import ollama
 
 logger = logging.getLogger(__name__)
 
@@ -120,36 +118,60 @@ def format_with_model(
         prompt_text = prompt_text[:MAX_PROMPT_CHARS]
 
     vocab = ", ".join(tag_vocab) if tag_vocab else "(none)"
-    response = client.chat(
-        model=model,
-        messages=[
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"EXISTING VAULT TAGS: {vocab}\n\n"
-                    f'Note:\n"""\n{prompt_text}\n"""'
-                ),
-            },
-        ],
-        format=FORMAT_SCHEMA,
-        options={"temperature": 0.2},
-    )
+    messages = [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"EXISTING VAULT TAGS: {vocab}\n\n"
+                f'Note:\n"""\n{prompt_text}\n"""'
+            ),
+        },
+    ]
+    response = _chat(client, model, messages)
     return _parse_model_reply(response.message.content)
 
 
-def _parse_model_reply(raw: str | None) -> tuple[list[str], str]:
-    """Parse and shape-check the model's JSON reply.
+def _chat(client: ollama.Client, model: str, messages: list[dict]):
+    """Call chat with thinking disabled, retrying without for older models.
 
-    Raises FormatError on missing content, invalid JSON, or wrong shapes
-    (tags must be a list of strings, formatted_markdown a non-blank string).
+    Thinking models (e.g. gemma4 MLX builds) put their whole reply in
+    message.thinking and leave content empty unless thinking is turned off.
+    Models without a thinking toggle reject the parameter with a
+    ResponseError, in which case the call is retried without it.
+    """
+    kwargs = {
+        "model": model,
+        "messages": messages,
+        "format": FORMAT_SCHEMA,
+        "options": {"temperature": 0.2},
+    }
+    try:
+        return client.chat(**kwargs, think=False)
+    except ollama.ResponseError as exc:
+        if "think" not in str(exc).lower():
+            raise
+        logger.debug("Model %s has no thinking toggle; retrying without", model)
+        return client.chat(**kwargs)
+
+
+def _parse_model_reply(raw: str | None) -> tuple[list[str], str]:
+    """Parse and shape-check the model's JSON reply, leniently.
+
+    MLX builds ignore the schema constraint and tend to fence their JSON in
+    markdown (or wrap it in prose), so strict parsing falls back to fence
+    stripping and then to the outermost {...} slice. Raises FormatError on
+    missing/empty content, unrecoverable JSON, or wrong shapes (tags must
+    be a list of strings, formatted_markdown a non-blank string).
     """
     if not isinstance(raw, str):
         raise FormatError("Model reply has no text content")
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise FormatError(f"Model reply is not valid JSON: {exc}") from exc
+    if not raw.strip():
+        raise FormatError(
+            "Model reply is empty — the model may have spent its whole "
+            "reply thinking; thinking is disabled when the model allows it"
+        )
+    parsed = _loads_lenient(raw)
     if not isinstance(parsed, dict):
         raise FormatError(
             f"Model reply is not a JSON object: {type(parsed).__name__}"
@@ -169,6 +191,29 @@ def _parse_model_reply(raw: str | None) -> tuple[list[str], str]:
 
     tags = [stripped for tag in raw_tags if (stripped := tag.strip())]
     return tags, body
+
+
+_CODE_FENCE_REPLY_RE = re.compile(
+    r"\A```[a-zA-Z]*[ \t]*\r?\n(.*)\r?\n```[ \t]*\Z", re.DOTALL
+)
+
+
+def _loads_lenient(raw: str) -> object:
+    """json.loads with fallbacks: strict, then unfenced, then {...} slice."""
+    text = raw.strip()
+    fence = _CODE_FENCE_REPLY_RE.match(text)
+    if fence is not None:
+        text = fence.group(1).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        start, end = text.find("{"), text.rfind("}")
+        if start == -1 or end <= start:
+            raise FormatError(f"Model reply is not valid JSON: {exc}") from exc
+        try:
+            return json.loads(text[start : end + 1])
+        except json.JSONDecodeError as exc2:
+            raise FormatError(f"Model reply is not valid JSON: {exc2}") from exc2
 
 
 def assemble_note(
@@ -344,10 +389,17 @@ def format_file(
     except (OSError, UnicodeDecodeError) as exc:
         raise FormatError(f"Could not read daily note {path}: {exc}") from exc
 
+    started = time.monotonic()
     tags, formatted_body = format_with_model(client, model, original, tag_vocab)
     document = assemble_note(original, formatted_body, tags, note_date, now)
     write_atomically(path, document)
-    logger.info("Formatted daily note %s (%d tags)", path, len(tags))
+    logger.info(
+        "Formatted %s in %.1fs (%d chars in, %d tags)",
+        path,
+        time.monotonic() - started,
+        len(original),
+        len(tags),
+    )
 
 
 def write_atomically(path: Path, text: str) -> None:
