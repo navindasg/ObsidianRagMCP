@@ -126,13 +126,33 @@ def test_non_mapping_frontmatter_means_not_formatted():
         "## ORIGINAL NOTES:",
     ],
 )
-def test_original_notes_heading_detected(line):
-    """An '## Original Notes' heading (any case, optional colon) is detected."""
-    assert is_already_formatted(f"some body\n\n{line}\nraw text\n") is True
+def test_mangled_formatted_frontmatter_with_heading_detected(line):
+    """Malformed frontmatter with a 'formatted:' line plus the heading counts.
+
+    This is the recovery path for formatter output whose YAML a user mangled:
+    the heading (any case, optional colon) confirms it was formatter output.
+    """
+    text = f"---\nformatted: [unclosed\n---\nbody\n\n{line}\nraw text\n"
+    assert is_already_formatted(text) is True
+
+
+def test_bare_original_notes_heading_is_not_marker():
+    """A raw note with a user-authored '## Original Notes' section is raw.
+
+    Without a leading frontmatter block carrying a 'formatted' key the
+    heading alone must not mark the note as formatted (review fix).
+    """
+    assert is_already_formatted("some body\n\n## Original Notes\nraw text\n") is False
+
+
+def test_heading_with_plain_frontmatter_is_not_marker():
+    """Frontmatter without a 'formatted' key does not arm the heading marker."""
+    text = "---\ntags: [a]\n---\nbody\n\n## Original Notes\nraw\n"
+    assert is_already_formatted(text) is False
 
 
 @pytest.mark.parametrize(
-    "text",
+    "tail",
     [
         "### Original Notes\n",
         "see ## Original Notes inline\n",
@@ -140,9 +160,11 @@ def test_original_notes_heading_detected(line):
         "",
     ],
 )
-def test_non_marker_text_not_formatted(text):
+def test_non_marker_text_not_formatted(tail):
     """Other heading levels, inline mentions, and plain text are not markers."""
+    text = f"---\nformatted: [unclosed\n---\n{tail}"
     assert is_already_formatted(text) is False
+    assert is_already_formatted(tail) is False
 
 
 # ---------------------------------------------------------------------------
@@ -211,9 +233,16 @@ def test_formatted_via_frontmatter_skipped(tmp_path):
 
 
 def test_formatted_via_original_notes_marker_skipped(tmp_path):
-    """A note containing an '## Original Notes' section is skipped."""
-    _make_note(tmp_path, "2026-06-10.md", "body\n\n## Original Notes\nraw\n")
+    """Mangled formatter output (formatted: line + heading) is skipped."""
+    text = "---\nformatted: [unclosed\n---\nbody\n\n## Original Notes\nraw\n"
+    _make_note(tmp_path, "2026-06-10.md", text)
     assert _find(tmp_path) == []
+
+
+def test_raw_note_with_original_notes_heading_is_candidate(tmp_path):
+    """A raw note with a user-authored '## Original Notes' section is eligible."""
+    note = _make_note(tmp_path, "2026-06-10.md", "body\n\n## Original Notes\nraw\n")
+    assert _find(tmp_path) == [note]
 
 
 def test_non_date_filenames_ignored(tmp_path):

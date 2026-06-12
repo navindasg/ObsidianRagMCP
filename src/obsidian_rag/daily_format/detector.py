@@ -33,6 +33,10 @@ _ORIGINAL_NOTES_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
+# A 'formatted' key line inside the raw frontmatter text; lets heading-based
+# detection still work when a formatted note's YAML has been mangled.
+_FORMATTED_KEY_LINE_RE = re.compile(r"^formatted[ \t]*:", re.MULTILINE)
+
 
 def parse_note_date(path: Path, filename_format: str) -> datetime.date | None:
     """Parse a daily-note date from a filename stem, or None if it is not one.
@@ -60,19 +64,29 @@ def parse_note_date(path: Path, filename_format: str) -> datetime.date | None:
 def is_already_formatted(text: str) -> bool:
     """Return True when a note has already been through the formatter.
 
-    A note counts as formatted when its YAML frontmatter contains a
-    'formatted' key, or its body contains an "## Original Notes" heading
-    (case-insensitive, optional trailing colon).
+    Formatter output always leads with a YAML frontmatter block carrying a
+    'formatted' key, so that is the authoritative marker. As a recovery
+    path for formatted notes whose YAML a user later mangled, a textual
+    'formatted:' line in the frontmatter block combined with an
+    "## Original Notes" heading (case-insensitive, optional trailing colon)
+    also counts. A bare heading in raw content is NOT a marker, so raw
+    notes with a user-authored "## Original Notes" section still format.
 
     Args:
         text: Full note text.
 
     Returns:
-        True when either formatted marker is present.
+        True when a formatted marker is present.
     """
+    match = _FRONTMATTER_RE.match(text)
+    if match is None:
+        return False
     if _frontmatter_has_formatted_key(text):
         return True
-    return _ORIGINAL_NOTES_RE.search(text) is not None
+    return (
+        _FORMATTED_KEY_LINE_RE.search(match.group(1)) is not None
+        and _ORIGINAL_NOTES_RE.search(text) is not None
+    )
 
 
 def _frontmatter_has_formatted_key(text: str) -> bool:
