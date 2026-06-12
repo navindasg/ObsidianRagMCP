@@ -115,3 +115,24 @@ def test_cli_debug_sets_debug(config_file):
 
     assert result.exit_code == 0, result.output
     assert logging.getLogger().level == logging.DEBUG
+
+
+# ---------------------------------------------------------------------------
+# python -m obsidian_rag entry point (regression: __main__ had 0% coverage)
+# ---------------------------------------------------------------------------
+
+
+def test_python_m_entry_point_runs():
+    """python -m obsidian_rag --version executes __main__.py end to end."""
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-m", "obsidian_rag", "--version"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0
+    assert "obsidian-rag" in result.stdout

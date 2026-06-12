@@ -179,36 +179,34 @@ def test_create_server_returns_fastmcp(app_config):
 
 
 def test_startup_banner_on_stderr(app_config, capsys):
-    """Startup banner prints to stderr when Ollama health check passes.
+    """The REAL lifespan prints the startup banner to stderr — and only stderr.
 
-    Verifies the banner format by running the lifespan coroutine directly
-    via asyncio, patching _check_ollama_health to avoid a real Ollama call.
+    stdout carries the MCP stdio protocol; anything printed there corrupts it.
     """
     import asyncio
 
-    import importlib.metadata
+    mock_index = MagicMock()
+    mock_index.ntotal = 0
 
-    # Import the lifespan function that create_server builds.
-    # We exercise it by calling create_server and extracting the lifespan
-    # via the internal _mcp_lifespan attribute (FastMCP stores it there).
-    server = create_server(app_config)
+    with (
+        patch("obsidian_rag.server.build_index", return_value=(mock_index, {}, {})),
+        patch("obsidian_rag.server._check_ollama_health"),
+        patch("obsidian_rag.server.VaultWatcher"),
+        patch("obsidian_rag.server.register_tools"),
+    ):
+        server = create_server(app_config)
 
-    # Grab the lifespan that was registered — FastMCP exposes it via .lifespan
-    # but calling convention requires (server,). Patch health check to avoid Ollama.
-    with patch("obsidian_rag.server._check_ollama_health"):
-        import sys
+        async def run():
+            async with server._lifespan_manager():
+                pass
 
-        vault_count = len(app_config.vaults)
-        version_str = importlib.metadata.version("obsidian-rag")
-        # Simulate exactly what the lifespan prints
-        print(
-            f"obsidian-rag v{version_str} | {vault_count} vault{'s' if vault_count != 1 else ''} | Ollama OK",
-            file=sys.stderr,
-        )
+        asyncio.run(run())
 
     captured = capsys.readouterr()
     assert "obsidian-rag v" in captured.err
     assert "Ollama OK" in captured.err
+    assert "Indexing complete" in captured.err
+    assert captured.out == "", "stdout must stay clean for the MCP stdio protocol"
 
 
 # ---------------------------------------------------------------------------
@@ -217,17 +215,40 @@ def test_startup_banner_on_stderr(app_config, capsys):
 
 
 def test_lifespan_calls_build_index(app_config):
-    """Verify build_index is importable from server module scope (wired into lifespan)."""
+    """The lifespan builds an index per vault and wires it into the context."""
+    import asyncio
+
     mock_index = MagicMock()
     mock_index.ntotal = 42
+    mock_metadata = {"0": {"file": "a.md"}}
+    mock_hashes = {"a.md": "hash"}
+    captured: list[dict] = []
 
-    with patch("obsidian_rag.server.build_index", return_value=(mock_index, {}, {})):
+    with (
+        patch(
+            "obsidian_rag.server.build_index",
+            return_value=(mock_index, mock_metadata, mock_hashes),
+        ) as mock_build,
+        patch("obsidian_rag.server._check_ollama_health"),
+        patch("obsidian_rag.server.VaultWatcher"),
+        patch("obsidian_rag.server.register_tools"),
+    ):
         server = create_server(app_config)
-        # Verify the import is available from server module scope
-        from obsidian_rag.server import build_index as imported_build
 
-        assert imported_build is not None
-        assert hasattr(server, "run")
+        async def run():
+            async with server._lifespan_manager():
+                captured.append(dict(server._lifespan_result))
+
+        asyncio.run(run())
+
+        mock_build.assert_called_once_with(app_config, app_config.vaults[0])
+
+    vault_indexes = captured[0]["vault_indexes"]
+    entry = vault_indexes[app_config.vaults[0].name]
+    assert entry["index"] is mock_index
+    assert entry["metadata"] == mock_metadata
+    assert entry["file_hashes"] == mock_hashes
+    assert entry["vault_config"] is app_config.vaults[0]
 
 
 # ---------------------------------------------------------------------------

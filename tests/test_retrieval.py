@@ -298,11 +298,35 @@ def test_token_cap_limits_results(sample_index_and_metadata):
     index, metadata, vectors = sample_index_and_metadata
     query = vectors[0].tolist()
 
-    # char_count for chunk 10 is 200 → ~50 tokens; set cap to 50 to get at most 1 result
+    # char_count for chunk 10 is 200 → ~50 tokens; the cap admits exactly the
+    # first result (50 tokens fills the budget) and stops before the second.
     result = search(index, metadata, query, top_k=5, max_context_tokens=50)
     results = result["results"]
-    # With a 50-token cap and each chunk at ≥50 tokens, we get at most 1 result
-    assert len(results) <= 2
+    assert len(results) == 1
+
+
+def test_filter_results_skips_missing_metadata(caplog):
+    """Candidates whose chunk_id has no metadata entry are skipped with a warning."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="obsidian_rag.retriever"):
+        result = filter_results([(99, 0.9)], metadata={})
+
+    assert result == []
+    assert any("No metadata" in r.message for r in caplog.records)
+
+
+def test_filter_results_vault_name_isolation():
+    """The vault_name filter rejects chunks belonging to other vaults."""
+    metadata = {
+        "1": {"file": "a.md", "vault": "work", "tags": [], "modified_ts": 0.0},
+        "2": {"file": "b.md", "vault": "personal", "tags": [], "modified_ts": 0.0},
+    }
+    candidates = [(1, 0.9), (2, 0.8)]
+
+    result = filter_results(candidates, metadata, vault_name="work")
+
+    assert result == [(1, 0.9)]
 
 
 def test_empty_results_returns_message(sample_index_and_metadata):

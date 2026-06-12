@@ -314,3 +314,19 @@ def test_tool_not_registered_when_disabled(app_config):
     note_context_fn = make_note_context_fn(app_config)
 
     assert note_context_fn is None, "note_context should not be registered when disabled"
+
+
+def test_note_context_deduplicates_forward_links(mock_ctx, vault_path):
+    """A target linked twice in one note appears once in forward_links."""
+    note = vault_path / "dupes.md"
+    note.write_text(
+        "# Dupes\n\nFirst [[wsn-pipeline]] and again [[wsn-pipeline]] here.",
+        encoding="utf-8",
+    )
+
+    note_context_fn = make_note_context_fn(mock_ctx.lifespan_context["config"])
+    result = note_context_fn(path="dupes.md", ctx=mock_ctx)
+
+    assert "error" not in result
+    targets = [link["path"] for link in result["forward_links"]]
+    assert len(targets) == len(set(targets)), f"Duplicate forward links: {targets}"

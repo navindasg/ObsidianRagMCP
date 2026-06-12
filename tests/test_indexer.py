@@ -462,3 +462,58 @@ def test_find_changed_files_returns_current_hashes(tmp_path):
     to_reindex, deleted, current_hashes = find_changed_files(vault, [note], stored_hashes={})
 
     assert current_hashes == {"a.md": sha256_file(note)}
+
+
+def test_build_index_string_tags_coerced(incremental_vault, tmp_path):
+    """Frontmatter 'tags: solo' (a bare string) becomes ['solo'] in metadata."""
+    vault_dir, config = incremental_vault
+    (vault_dir / "note.md").write_text(
+        "---\ntags: solo\n---\n# Note\n\nContent long enough to chunk properly here."
+    )
+
+    _, metadata, _ = _build_with_mocked_ollama(tmp_path, config, config.vaults[0])
+
+    assert all(m["tags"] == ["solo"] for m in metadata.values())
+
+
+def test_build_index_skips_unparseable_file(incremental_vault, tmp_path):
+    """One unreadable note must not abort indexing of the rest of the vault."""
+    vault_dir, config = incremental_vault
+    (vault_dir / "good.md").write_text(
+        "# Good\n\nThis note chunks fine and must still be indexed."
+    )
+
+    real_chunk_document = __import__(
+        "obsidian_rag.markdown_parser", fromlist=["chunk_document"]
+    ).chunk_document
+
+    def flaky_chunk(file_path, **kwargs):
+        if file_path.name == "note.md":
+            raise UnicodeDecodeError("utf-8", b"", 0, 1, "boom")
+        return real_chunk_document(file_path, **kwargs)
+
+    with patch("obsidian_rag.indexer.chunk_document", side_effect=flaky_chunk):
+        index, metadata, _ = _build_with_mocked_ollama(
+            tmp_path, config, config.vaults[0]
+        )
+
+    files = {m["file"] for m in metadata.values()}
+    assert "good.md" in files, "Healthy notes must be indexed despite one failure"
+    assert "note.md" not in files
+
+
+def test_build_index_invokes_progress_callback(incremental_vault, tmp_path):
+    """progress_callback receives (current, total) for each processed file."""
+    vault_dir, config = incremental_vault
+    calls: list[tuple[int, int]] = []
+
+    with patch("obsidian_rag.indexer.ollama_client.Client") as mock_cls:
+        mock_cls.return_value.embed.side_effect = lambda model, input: MagicMock(
+            embeddings=[[0.1] * 768] * len(input)
+        )
+        with patch("obsidian_rag.indexer.Path.home", return_value=tmp_path):
+            build_index(
+                config, config.vaults[0], progress_callback=lambda c, t: calls.append((c, t))
+            )
+
+    assert calls == [(1, 1)]

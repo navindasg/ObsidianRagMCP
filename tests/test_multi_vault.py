@@ -508,3 +508,17 @@ def test_single_vault_auto_infer(tmp_path):
     assert "error" not in result, f"Unexpected error: {result}"
     assert result["path"] == "note.md"
     assert "Content here" in result["content"]
+
+
+def test_find_notes_scoped_to_vault(mock_ctx_two_vaults):
+    """find_notes with a valid vault_name returns only that vault's files."""
+    _, registered = make_mcp_and_register(mock_ctx_two_vaults.lifespan_context["config"])
+    find_notes_fn = registered["find_notes"]
+
+    result = find_notes_fn(query="", vault_name="vault-b", ctx=mock_ctx_two_vaults)
+
+    files = [r["file"] for r in result["results"]]
+    assert files, "Expected vault-b notes"
+    assert all("vault-b" in f or f == "vault-b-note.md" for f in files) or all(
+        f not in ("notes/hello.md", "projects/readme.md") for f in files
+    ), f"vault-a files leaked into scoped find_notes: {files}"

@@ -162,10 +162,13 @@ def test_register_tools_respects_enabled(app_config):
 
 
 def test_register_tools_all_enabled(app_config):
-    """All 6 tools are registered when all are enabled."""
+    """Every tool in the ToolsConfig default list is registered."""
+    from obsidian_rag.models import ToolsConfig
+
     _, registered = make_mcp_and_register(app_config)
-    for tool_name in ("search", "read_note", "list_notes", "find_notes", "vault_stats", "reindex"):
+    for tool_name in ToolsConfig().enabled:
         assert tool_name in registered, f"{tool_name} should be registered"
+    assert len(registered) == len(ToolsConfig().enabled)
 
 
 # ---------------------------------------------------------------------------
@@ -653,3 +656,42 @@ def test_vault_stats_surfaces_last_reindex(mock_ctx):
     result = registered["vault_stats"](ctx=mock_ctx)
 
     assert result["vaults"][0]["last_reindex"]["status"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# list_notes exclusions and vault_stats index_age
+# ---------------------------------------------------------------------------
+
+
+def test_list_notes_skips_excluded_dirs(mock_ctx, vault_path):
+    """Notes under .obsidian/.trash/templates never appear in list_notes."""
+    for excluded in (".obsidian", ".trash", "templates"):
+        d = vault_path / excluded
+        d.mkdir(exist_ok=True)
+        (d / "hidden.md").write_text("# Hidden")
+
+    _, registered = make_mcp_and_register(mock_ctx.lifespan_context["config"])
+    result = registered["list_notes"](ctx=mock_ctx)
+
+    paths = [n["path"] for n in result["notes"]]
+    assert paths, "Expected regular notes to be listed"
+    for p in paths:
+        assert not p.startswith((".obsidian", ".trash", "templates")), p
+
+
+def test_vault_stats_index_age(mock_ctx, tmp_path):
+    """index_age is the ISO-8601 mtime of the persisted metadata.json."""
+    storage = tmp_path / ".obsidian-rag" / "test"
+    storage.mkdir(parents=True)
+    (storage / "metadata.json").write_text("{}")
+
+    _, registered = make_mcp_and_register(mock_ctx.lifespan_context["config"])
+
+    with patch("obsidian_rag.indexer.Path.home", return_value=tmp_path):
+        result = registered["vault_stats"](ctx=mock_ctx)
+
+    from datetime import datetime
+
+    index_age = result["vaults"][0]["index_age"]
+    assert index_age is not None
+    datetime.fromisoformat(index_age)  # must parse
