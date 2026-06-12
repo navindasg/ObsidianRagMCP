@@ -147,6 +147,35 @@ def test_chat_called_with_schema_and_options() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 2b: system prompt covers mixed-content classification
+# ---------------------------------------------------------------------------
+
+
+def test_system_prompt_covers_mixed_content_classification() -> None:
+    """Dailies hold prompts, logins, and drafts — the model must be told.
+
+    The prompt has to ask for classification under contextual headings
+    (e.g. "## Draft: ..."), matching tags, and verbatim preservation of
+    credentials, prompt text, code, URLs, and draft wording.
+    """
+    client = _make_client(_json_reply(["work"], "body text"))
+
+    format_with_model(client, "llama3.2", "raw note text", ["work"])
+
+    system = client.chat.call_args.kwargs["messages"][0]["content"]
+    lowered = system.lower()
+    # The mixed content types the model must classify.
+    for content_type in ("draft", "prompt", "login"):
+        assert content_type in lowered
+    # Contextual headings naming type and subject.
+    assert "## Draft:" in system
+    # Verbatim preservation of sensitive/fragile content.
+    assert "verbatim" in lowered
+    for preserved in ("credential", "code", "url"):
+        assert preserved in lowered
+
+
+# ---------------------------------------------------------------------------
 # Test 3: existing frontmatter — tag union, preserved keys, moved block
 # ---------------------------------------------------------------------------
 
