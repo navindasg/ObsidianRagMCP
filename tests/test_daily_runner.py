@@ -373,3 +373,96 @@ def test_blacklisted_note_never_enqueued(tmp_path: Path) -> None:
 
     assert summary["enqueued"] == 1
     assert summary["pending"] == ["2026-06-11.md"]
+
+
+# ---------------------------------------------------------------------------
+# Tests 13-17: #!format tag trigger
+# ---------------------------------------------------------------------------
+
+TAGGED_NOTE = "Dear Alice,\ndraft of my message\n#!format\n"
+
+
+def test_tagged_note_formatted_same_run(tmp_path: Path) -> None:
+    """A tagged non-daily note is enqueued, stripped, and formatted now."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    note = vault / "message draft.md"
+    note.write_text(TAGGED_NOTE, encoding="utf-8")
+    cfg = _make_cfg(vault)
+    client = _client_with_replies(_reply(["draft"], "## Draft: to Alice\ndraft of my message"))
+
+    summary = _run(cfg, tmp_path / "queue.json", client=client)
+
+    assert summary["enqueued"] == 1
+    assert summary["formatted"] == 1
+    text = note.read_text(encoding="utf-8")
+    assert "#!format" not in text
+    assert "## Original Notes" in text
+    assert "draft of my message" in text
+    # Non-daily notes carry no date key, only the formatted timestamp.
+    assert "\ndate:" not in text
+    assert "formatted:" in text
+
+
+def test_dry_run_reports_tagged_note_but_keeps_marker(tmp_path: Path) -> None:
+    """Dry runs never modify notes: the marker survives, the report shows it."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    note = vault / "idea.md"
+    note.write_text(TAGGED_NOTE, encoding="utf-8")
+    cfg = _make_cfg(vault)
+
+    summary = _run(cfg, tmp_path / "queue.json", dry_run=True)
+
+    assert summary["pending"] == ["idea.md"]
+    assert "#!format" in note.read_text(encoding="utf-8")
+
+
+def test_tagged_daily_note_stripped_but_not_fast_tracked(tmp_path: Path) -> None:
+    """The marker on a daily note is consumed; dailies keep the next-day rule."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    today_note = vault / "2026-06-12.md"
+    today_note.write_text(TAGGED_NOTE, encoding="utf-8")
+    cfg = _make_cfg(vault)
+
+    summary = _run(cfg, tmp_path / "queue.json")
+
+    assert summary["enqueued"] == 0
+    assert summary.get("formatted", 0) == 0
+    assert "#!format" not in today_note.read_text(encoding="utf-8")
+
+
+def test_tagged_already_formatted_note_skipped(tmp_path: Path) -> None:
+    """Tagging an already-formatted note consumes the marker but never
+    double-wraps the note in a second Original Notes section."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    note = vault / "done.md"
+    note.write_text(
+        "---\nformatted: '2026-06-01T00:00:00'\n---\nbody\n\n## Original Notes\n\nraw\n#!format\n",
+        encoding="utf-8",
+    )
+    cfg = _make_cfg(vault)
+    client = _client_with_replies()
+
+    summary = _run(cfg, tmp_path / "queue.json", client=client)
+
+    text = note.read_text(encoding="utf-8")
+    assert "#!format" not in text
+    assert text.count("## Original Notes") == 1
+    assert summary["formatted"] == 0
+
+
+def test_format_tag_none_disables_scan(tmp_path: Path) -> None:
+    """With format_tag null the trigger scan never runs."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    note = vault / "idea.md"
+    note.write_text(TAGGED_NOTE, encoding="utf-8")
+    cfg = _make_cfg(vault, format_tag=None)
+
+    summary = _run(cfg, tmp_path / "queue.json", dry_run=True)
+
+    assert summary["enqueued"] == 0
+    assert "#!format" in note.read_text(encoding="utf-8")

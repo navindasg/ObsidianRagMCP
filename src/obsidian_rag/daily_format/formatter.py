@@ -11,6 +11,7 @@ Public API:
     format_with_model(client, model, text, tag_vocab) -> (tags, body)
     assemble_note(original, formatted_body, tags, note_date, now) -> str
     format_file(path, *, client, model, tag_vocab, note_date, now) -> None
+    write_atomically(path, text) -> None
 """
 
 from __future__ import annotations
@@ -174,7 +175,7 @@ def assemble_note(
     original: str,
     formatted_body: str,
     tags: list[str],
-    note_date: datetime.date,
+    note_date: datetime.date | None,
     now: datetime.datetime,
 ) -> str:
     """Assemble the final note document in code (the model never writes it).
@@ -189,7 +190,8 @@ def assemble_note(
         original: Full original note text.
         formatted_body: Model-produced markdown body.
         tags: Model-suggested tags (unioned with any existing tags).
-        note_date: Date the note covers; written as the 'date' key.
+        note_date: Date the note covers, written as the 'date' key; None
+            for tag-triggered non-daily notes, which omit the key.
         now: Formatting timestamp; written as the 'formatted' key.
 
     Returns:
@@ -262,17 +264,20 @@ def _merge_tags(existing: list[str], new: list[str]) -> list[str]:
 def _build_frontmatter(
     existing: dict,
     merged_tags: list[str],
-    note_date: datetime.date,
+    note_date: datetime.date | None,
     now: datetime.datetime,
 ) -> dict:
     """Build the merged frontmatter mapping.
 
-    Key order: tags (omitted when empty), date, formatted, then any other
-    keys preserved from the original frontmatter. Our date/formatted values
-    win over same-named existing keys.
+    Key order: tags (omitted when empty), date (omitted when the note has
+    none), formatted, then any other keys preserved from the original
+    frontmatter. Our date/formatted values win over same-named existing keys.
     """
     head: dict = (
         {"tags": merged_tags} if merged_tags else {}
+    )
+    date_part: dict = (
+        {"date": note_date.isoformat()} if note_date is not None else {}
     )
     rest = {
         key: value
@@ -281,7 +286,7 @@ def _build_frontmatter(
     }
     return {
         **head,
-        "date": note_date.isoformat(),
+        **date_part,
         "formatted": now.isoformat(timespec="seconds"),
         **rest,
     }
@@ -320,7 +325,7 @@ def format_file(
     client: ollama.Client,
     model: str,
     tag_vocab: list[str],
-    note_date: datetime.date,
+    note_date: datetime.date | None,
     now: datetime.datetime,
 ) -> None:
     """Format one daily note in place, atomically.
@@ -341,15 +346,16 @@ def format_file(
 
     tags, formatted_body = format_with_model(client, model, original, tag_vocab)
     document = assemble_note(original, formatted_body, tags, note_date, now)
-    _write_atomically(path, document)
+    write_atomically(path, document)
     logger.info("Formatted daily note %s (%d tags)", path, len(tags))
 
 
-def _write_atomically(path: Path, text: str) -> None:
+def write_atomically(path: Path, text: str) -> None:
     """Write text via a unique temp file in the same dir, then os.replace.
 
     Mirrors indexer._replace_atomically so a crash mid-write never leaves a
-    truncated or partial note behind.
+    truncated or partial note behind. Shared with trigger.py, which rewrites
+    notes to strip the format tag.
     """
     fd, tmp_name = tempfile.mkstemp(
         dir=path.parent, prefix=f"{path.name}.", suffix=".tmp"

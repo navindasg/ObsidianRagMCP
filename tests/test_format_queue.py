@@ -134,6 +134,7 @@ def test_disk_format_shape(tmp_path):
             "rel_path": "2026-06-11.md",
             "note_date": "2026-06-11",
             "attempts": 0,
+            "kind": "daily",
         }
     ]
 
@@ -298,3 +299,46 @@ def test_default_queue_path(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
 
     assert default_queue_path() == tmp_path / ".obsidian-rag" / "format_queue.json"
+
+
+# ---------------------------------------------------------------------------
+# Tagged items: kind field, dateless notes, legacy state files
+# ---------------------------------------------------------------------------
+
+
+def test_tagged_item_round_trips(tmp_path):
+    """A tagged item (kind='tagged', no date) survives save/load intact."""
+    path = tmp_path / "queue.json"
+    queue = FormatQueue.load(path)
+    item = QueueItem(vault="main", rel_path="ideas/draft.md", note_date=None, kind="tagged")
+    queue.enqueue(item)
+    queue.save()
+
+    reloaded = FormatQueue.load(path)
+
+    assert reloaded.items == (item,)
+    assert reloaded.items[0].kind == "tagged"
+    assert reloaded.items[0].note_date is None
+
+
+def test_item_kind_defaults_to_daily():
+    """Items constructed without a kind are daily notes."""
+    item = QueueItem(vault="main", rel_path="2026-06-11.md", note_date="2026-06-11")
+    assert item.kind == "daily"
+
+
+def test_legacy_state_without_kind_loads_as_daily(tmp_path):
+    """Queue files written before the kind field default to daily items."""
+    path = tmp_path / "queue.json"
+    state = {
+        "start_date": "2026-06-01",
+        "items": [
+            {"vault": "main", "rel_path": "2026-06-11.md", "note_date": "2026-06-11", "attempts": 1}
+        ],
+    }
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+    queue = FormatQueue.load(path)
+
+    assert queue.items[0].kind == "daily"
+    assert queue.items[0].attempts == 1

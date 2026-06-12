@@ -95,6 +95,8 @@ class DailyFormatConfig(BaseModel):
     # Notes never formatted: filename stems or vault-relative paths,
     # the .md suffix optional in either form.
     blacklist: list[str] = Field(default_factory=list)
+    # Marker that opts any note in to the next formatting run; null disables.
+    format_tag: str | None = Field(default="#!format", min_length=1)
 
 
 class AppConfig(BaseModel):

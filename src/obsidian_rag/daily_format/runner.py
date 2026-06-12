@@ -26,6 +26,7 @@ from obsidian_rag.daily_format.formatter import FormatError, format_file
 from obsidian_rag.daily_format.model_select import select_model
 from obsidian_rag.daily_format.queue import FormatQueue, QueueItem, default_queue_path
 from obsidian_rag.daily_format.tags import collect_vault_tags
+from obsidian_rag.daily_format.trigger import scan_format_tags, strip_format_tag
 from obsidian_rag.models import AppConfig, VaultConfig
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,7 @@ def run_format_daily(
     start_date = cfg.daily_format.start_date or queue.ensure_start_date(today)
 
     enqueued = _enqueue_candidates(cfg, queue, today=today, start_date=start_date)
+    enqueued += _enqueue_tagged(cfg, queue, dry_run=dry_run)
     queue.save()
     pending = queue.pending(cfg.daily_format.max_retries)
 
@@ -128,6 +130,49 @@ def _enqueue_candidates(
     return enqueued
 
 
+def _enqueue_tagged(cfg: AppConfig, queue: FormatQueue, *, dry_run: bool) -> int:
+    """Scan every vault for format-tagged notes and enqueue them.
+
+    The marker is stripped as soon as the note is queued (the queue, not
+    the marker, now carries the request) — except on dry runs, which never
+    modify notes. Daily-pattern notes only have their marker consumed:
+    dailies are auto-scheduled and keep the next-day rule.
+    """
+    daily = cfg.daily_format
+    if daily.format_tag is None:
+        return 0
+
+    enqueued = 0
+    for vault in cfg.vaults:
+        tagged = scan_format_tags(
+            vault.path,
+            format_tag=daily.format_tag,
+            excluded_dirs=vault.excluded_dirs,
+            excluded_patterns=vault.excluded_patterns,
+            blacklist=daily.blacklist,
+        )
+        for path in tagged:
+            rel_path = str(path.relative_to(vault.path))
+            if parse_note_date(path, daily.filename_format) is not None:
+                logger.info(
+                    "Daily note %s carries %s; dailies are auto-scheduled — "
+                    "consuming the tag",
+                    rel_path,
+                    daily.format_tag,
+                )
+                if not dry_run:
+                    strip_format_tag(path, daily.format_tag)
+                continue
+            item = QueueItem(
+                vault=vault.name, rel_path=rel_path, note_date=None, kind="tagged"
+            )
+            if queue.enqueue(item):
+                enqueued += 1
+            if not dry_run:
+                strip_format_tag(path, daily.format_tag)
+    return enqueued
+
+
 def _drain(
     cfg: AppConfig,
     queue: FormatQueue,
@@ -155,8 +200,12 @@ def _drain(
             continue
 
         path = _resolve_in_vault(vault.path, item.rel_path)
-        note_date = datetime.date.fromisoformat(item.note_date)
-        if path is None or not _still_eligible(path, note_date, today):
+        note_date = (
+            datetime.date.fromisoformat(item.note_date)
+            if item.note_date is not None
+            else None
+        )
+        if path is None or not _item_still_eligible(item, path, note_date, today):
             logger.info(
                 "Skipping %s/%s: no longer eligible", item.vault, item.rel_path
             )
@@ -197,16 +246,25 @@ def _resolve_in_vault(vault_root: Path, rel_path: str) -> Path | None:
     return candidate
 
 
-def _still_eligible(path: Path, note_date: datetime.date, today: datetime.date) -> bool:
+def _item_still_eligible(
+    item: QueueItem,
+    path: Path,
+    note_date: datetime.date | None,
+    today: datetime.date,
+) -> bool:
     """Re-check eligibility right before formatting (queue may be stale).
 
-    A note is no longer eligible when its date is not yet in the past
-    (next-day rule), the file vanished, or it was formatted in the meantime.
-    Read errors other than a missing file return True so format_file can
-    surface them as a proper FormatError.
+    A note is no longer eligible when the file vanished or it was formatted
+    in the meantime. Daily items additionally require their date to be in
+    the past (next-day rule); a daily item missing its date can only come
+    from a hand-edited queue file and is treated as ineligible. Tagged items
+    were opted in explicitly and have no date gate. Read errors other than
+    a missing file return True so format_file can surface them as a proper
+    FormatError.
     """
-    if note_date >= today:
-        return False
+    if item.kind != "tagged":
+        if note_date is None or note_date >= today:
+            return False
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:

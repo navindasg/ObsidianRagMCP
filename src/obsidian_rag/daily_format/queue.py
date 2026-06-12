@@ -33,19 +33,24 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class QueueItem:
-    """One daily note awaiting formatting.
+    """One note awaiting formatting.
 
     Attributes:
         vault: Name of the vault containing the note.
         rel_path: Path of the note relative to the vault root.
-        note_date: ISO date (YYYY-MM-DD) the note covers.
+        note_date: ISO date (YYYY-MM-DD) the note covers; None for notes
+            queued via the format tag, which have no date of their own.
         attempts: Number of failed formatting attempts so far.
+        kind: "daily" for scheduled daily notes (next-day rule applies),
+            "tagged" for notes opted in via the format tag (formatted on
+            the next run).
     """
 
     vault: str
     rel_path: str
-    note_date: str
+    note_date: str | None
     attempts: int = 0
+    kind: str = "daily"
 
     @property
     def key(self) -> tuple[str, str]:
@@ -75,8 +80,14 @@ def _parse_state(raw: object) -> tuple[datetime.date | None, tuple[QueueItem, ..
         QueueItem(
             vault=str(entry["vault"]),
             rel_path=str(entry["rel_path"]),
-            note_date=str(entry["note_date"]),
+            note_date=(
+                str(entry["note_date"])
+                if entry.get("note_date") is not None
+                else None
+            ),
             attempts=int(entry.get("attempts", 0)),
+            # State files written before the format-tag trigger have no kind.
+            kind=str(entry.get("kind", "daily")),
         )
         for entry in raw_items
     )

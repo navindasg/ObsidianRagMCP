@@ -57,6 +57,7 @@ vaults:
 #   catchup_days: 14
 #   max_retries: 3
 #   blacklist: []
+#   format_tag: "#!format"
 """
 
 

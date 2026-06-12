@@ -181,6 +181,8 @@ daily_format:
   start_date: null               # No-backfill cutoff (null = recorded on first run)
   catchup_days: 14               # Max age in days of notes picked up after downtime
   max_retries: 3                 # Attempts per note before it is parked in the queue
+  blacklist: []                  # Notes never formatted (stems or relative paths, .md optional)
+  format_tag: "#!format"         # Marker that opts any note in to the next run (null disables)
 ```
 
 ### Section descriptions
@@ -261,6 +263,11 @@ The `formatted` frontmatter key marks a note as done, so a note is never formatt
 - **Next-day rule:** a note is only formatted once its date is in the past. Today's note is never touched; yesterday's note is picked up by tonight's run.
 - **No backfill:** only notes dated on or after `start_date` are eligible. When `start_date` is `null` (the default), the first run records its own date into the queue file — so daily notes that existed before you enabled the feature are never reformatted. Set `start_date` explicitly in the config to override.
 - **Catch-up window:** after downtime, at most the last `catchup_days` days of notes are picked up.
+- **Blacklist:** notes listed in `daily_format.blacklist` are never formatted, even when tagged. Entries match a filename stem (`2026-06-10`) or a vault-relative path (`drafts/letter`), with the `.md` suffix optional.
+
+### Formatting any note on demand: the format tag
+
+Type the `format_tag` marker (default `#!format`) anywhere in a note — daily or not — and the next run picks it up. The marker is stripped from the note as soon as it is queued, so the request survives even if Ollama is down at the time. Tagged notes skip the next-day and no-backfill rules (the tag is the opt-in) and are formatted with the same structure, minus the `date` frontmatter key. Two exceptions: tagging an already-formatted note only consumes the marker (it is never double-wrapped), and tagging a daily note only consumes the marker too — dailies stay on their next-day schedule. The model is also told these notes can hold mixed content (LLM prompts, logins, message drafts) and labels such sections with contextual headings like `## Draft: …` while preserving credentials, prompt text, code, URLs, and draft wording verbatim.
 
 ### Running it
 

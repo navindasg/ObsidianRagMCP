@@ -176,6 +176,21 @@ def test_system_prompt_covers_mixed_content_classification() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 2c: dateless (tagged, non-daily) notes omit the date key
+# ---------------------------------------------------------------------------
+
+
+def test_dateless_note_omits_date_key() -> None:
+    """Tag-triggered non-daily notes have no date; the key is omitted."""
+    document = assemble_note("raw text\n", "## Notes\nraw text", ["idea"], None, NOW)
+
+    frontmatter = _frontmatter_of(document)
+    assert "date" not in frontmatter
+    assert frontmatter["formatted"] == "2026-06-12T02:00:00"
+    assert is_already_formatted(document)
+
+
+# ---------------------------------------------------------------------------
 # Test 3: existing frontmatter — tag union, preserved keys, moved block
 # ---------------------------------------------------------------------------
 
