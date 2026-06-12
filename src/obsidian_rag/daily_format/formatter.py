@@ -199,7 +199,12 @@ _CODE_FENCE_REPLY_RE = re.compile(
 
 
 def _loads_lenient(raw: str) -> object:
-    """json.loads with fallbacks: strict, then unfenced, then {...} slice."""
+    """json.loads with fallbacks: strict, unfenced, then first-object decode.
+
+    raw_decode from the first ``{`` parses the first complete JSON object
+    and ignores anything after it — models sometimes append a second stray
+    object or trailing prose ("Extra data" errors).
+    """
     text = raw.strip()
     fence = _CODE_FENCE_REPLY_RE.match(text)
     if fence is not None:
@@ -207,11 +212,12 @@ def _loads_lenient(raw: str) -> object:
     try:
         return json.loads(text)
     except json.JSONDecodeError as exc:
-        start, end = text.find("{"), text.rfind("}")
-        if start == -1 or end <= start:
+        start = text.find("{")
+        if start == -1:
             raise FormatError(f"Model reply is not valid JSON: {exc}") from exc
         try:
-            return json.loads(text[start : end + 1])
+            parsed, _ = json.JSONDecoder().raw_decode(text[start:])
+            return parsed
         except json.JSONDecodeError as exc2:
             raise FormatError(f"Model reply is not valid JSON: {exc2}") from exc2
 

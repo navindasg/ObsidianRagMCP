@@ -519,3 +519,13 @@ def test_format_file_logs_duration(tmp_path: Path, caplog) -> None:
         re_mod.search(r"Formatted .+ in \d+\.\d+s", record.message)
         for record in caplog.records
     )
+
+
+def test_json_with_trailing_second_object_parsed() -> None:
+    """A valid object followed by extra data parses to the first object."""
+    reply = _json_reply(["work"], "## B") + '\n{"stray": true}\ntrailing prose'
+    client = _make_client(reply)
+
+    tags, body = format_with_model(client, "m", "raw", [])
+
+    assert (tags, body) == (["work"], "## B")
