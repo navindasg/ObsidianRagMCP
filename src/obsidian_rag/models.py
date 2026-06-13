@@ -99,6 +99,8 @@ class DailyFormatConfig(BaseModel):
     format_tag: str | None = Field(default="#!format", min_length=1)
     # How often the background agent polls for format tags, in minutes.
     poll_minutes: int = Field(default=5, gt=0)
+    # Defer a run when on battery power below this percent; 0 disables.
+    min_battery_percent: int = Field(default=20, ge=0, le=100)
 
 
 class AppConfig(BaseModel):

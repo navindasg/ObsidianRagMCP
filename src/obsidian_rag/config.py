@@ -59,6 +59,7 @@ vaults:
 #   blacklist: []
 #   format_tag: "#!format"
 #   poll_minutes: 5
+#   min_battery_percent: 20
 """
 
 

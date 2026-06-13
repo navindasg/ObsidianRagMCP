@@ -184,6 +184,7 @@ daily_format:
   blacklist: []                  # Notes never formatted (stems or relative paths, .md optional)
   format_tag: "#!format"         # Marker that opts any note in to the next run (null disables)
   poll_minutes: 5                # Background tag-poll interval in minutes
+  min_battery_percent: 20        # Defer runs on battery below this percent (0 disables)
 ```
 
 ### Section descriptions
@@ -300,6 +301,10 @@ obsidian-rag schedule uninstall    # remove both agents
 ### The persistent queue
 
 Work is tracked in a JSON queue at `~/.obsidian-rag/format_queue.json`, which also stores the recorded `start_date`. The queue survives sleep, crashes, and failures: if Ollama is unreachable, everything stays queued for the next run, and one note's failure never aborts the rest of the run.
+
+### Battery gate
+
+A formatting run can spend minutes in the model, so on a laptop it defers when the battery is low. A run is deferred (everything left queued) only when the machine is **on battery power and below `min_battery_percent`** (default 20). On AC power — charging, no drain risk — a desktop with no battery, or whenever battery state can't be read, the run proceeds; the gate fails open and never blocks formatting indefinitely. There is no busy-waiting: a deferred run simply leaves the queue intact, and the next tag poll or nightly run picks it up once the battery recovers. Set `min_battery_percent: 0` to disable the gate.
 
 ### Model selection
 

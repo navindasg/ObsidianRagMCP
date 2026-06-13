@@ -24,6 +24,7 @@ from obsidian_rag.daily_format.detector import (
 )
 from obsidian_rag.daily_format.formatter import FormatError, format_file
 from obsidian_rag.daily_format.model_select import select_model
+from obsidian_rag.daily_format.power import read_power_state, should_defer
 from obsidian_rag.daily_format.queue import FormatQueue, QueueItem, default_queue_path
 from obsidian_rag.daily_format.tags import collect_vault_tags
 from obsidian_rag.daily_format.trigger import scan_format_tags, strip_format_tag
@@ -60,7 +61,9 @@ def run_format_daily(
         Summary counts. Normal runs: {"enqueued", "formatted", "failed",
         "skipped"}. Dry runs: {"enqueued", "pending", "formatted", "failed"}.
         When Ollama is unreachable: {"enqueued", "formatted", "failed",
-        "queued", "ollama_down"} with everything left queued.
+        "queued", "ollama_down"} with everything left queued. When deferred
+        for low battery: {"enqueued", "formatted", "failed", "queued",
+        "battery_deferred", "battery_percent"} with everything left queued.
     """
     today = today if today is not None else datetime.date.today()
     queue = FormatQueue.load(queue_path if queue_path is not None else default_queue_path())
@@ -92,6 +95,24 @@ def run_format_daily(
     if not pending:
         logger.info("No pending daily notes to format")
         return {"enqueued": enqueued, "formatted": 0, "failed": 0, "skipped": 0}
+
+    power = read_power_state()
+    if should_defer(power, cfg.daily_format.min_battery_percent):
+        logger.warning(
+            "Battery at %s%% on battery power (threshold %s%%); deferring "
+            "%d item(s) until the battery recovers",
+            power.percent,
+            cfg.daily_format.min_battery_percent,
+            len(pending),
+        )
+        return {
+            "enqueued": enqueued,
+            "formatted": 0,
+            "failed": 0,
+            "queued": len(pending),
+            "battery_deferred": True,
+            "battery_percent": power.percent,
+        }
 
     client = ollama.Client(host=cfg.embedding.ollama_url)
     try:

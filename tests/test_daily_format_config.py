@@ -221,3 +221,12 @@ def test_poll_minutes_default_and_validation():
     assert DailyFormatConfig().poll_minutes == 5
     with pytest.raises(ValidationError):
         DailyFormatConfig(poll_minutes=0)
+
+
+def test_min_battery_percent_default_and_validation():
+    """min_battery_percent defaults to 20 and is bounded 0..100."""
+    assert DailyFormatConfig().min_battery_percent == 20
+    with pytest.raises(ValidationError):
+        DailyFormatConfig(min_battery_percent=-1)
+    with pytest.raises(ValidationError):
+        DailyFormatConfig(min_battery_percent=101)

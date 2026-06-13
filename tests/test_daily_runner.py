@@ -74,12 +74,16 @@ def _run(
     tags_only: bool = False,
     since: datetime.date | None = None,
     select_model_error: Exception | None = None,
+    power_state: Any = None,
 ) -> dict:
     """Invoke run_format_daily with ollama and select_model mocked out.
 
     With client=None, constructing ollama.Client raises AssertionError so a
-    test can prove Ollama is never touched.
+    test can prove Ollama is never touched. read_power_state is always
+    patched (default: charged on AC) so tests never shell out to pmset.
     """
+    from obsidian_rag.daily_format.power import PowerState
+
     mock_ollama = MagicMock()
     if client is None:
         mock_ollama.Client.side_effect = AssertionError(
@@ -92,9 +96,17 @@ def _run(
         if select_model_error is not None
         else {"return_value": "llama3.2"}
     )
+    state = (
+        power_state
+        if power_state is not None
+        else PowerState(has_battery=False, percent=None, on_ac_power=True)
+    )
     with (
         patch("obsidian_rag.daily_format.runner.ollama", mock_ollama),
         patch("obsidian_rag.daily_format.runner.select_model", **select_kwargs),
+        patch(
+            "obsidian_rag.daily_format.runner.read_power_state", return_value=state
+        ),
     ):
         return run_format_daily(
             cfg,
@@ -599,3 +611,70 @@ def test_since_still_respects_blacklist_and_next_day(tmp_path: Path) -> None:
 
     assert summary["enqueued"] == 0
     assert summary["pending"] == []
+
+
+# ---------------------------------------------------------------------------
+# Tests 21-23: battery gate
+# ---------------------------------------------------------------------------
+
+from obsidian_rag.daily_format.power import PowerState  # noqa: E402
+
+
+def test_low_battery_defers_without_touching_ollama(tmp_path: Path) -> None:
+    """On battery below the threshold, drain is deferred and items stay queued."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "2026-06-11.md").write_text(RAW_NOTE, encoding="utf-8")
+    cfg = _make_cfg(vault)
+    queue_path = tmp_path / "queue.json"
+
+    # client=None makes ollama.Client construction assert; proving we never reach it.
+    summary = _run(
+        cfg,
+        queue_path,
+        power_state=PowerState(has_battery=True, percent=15, on_ac_power=False),
+    )
+
+    assert summary["battery_deferred"] is True
+    assert summary["battery_percent"] == 15
+    assert summary["formatted"] == 0
+    assert summary["queued"] == 1
+    # The note is still raw and still queued for a later run.
+    assert (vault / "2026-06-11.md").read_text(encoding="utf-8") == RAW_NOTE
+    state = json.loads(queue_path.read_text(encoding="utf-8"))
+    assert [item["rel_path"] for item in state["items"]] == ["2026-06-11.md"]
+
+
+def test_low_battery_on_ac_proceeds(tmp_path: Path) -> None:
+    """Charging below the threshold still formats — no drain risk on AC."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "2026-06-11.md").write_text(RAW_NOTE, encoding="utf-8")
+    cfg = _make_cfg(vault)
+    client = _client_with_replies(_reply(["t"], "## B"))
+
+    summary = _run(
+        cfg,
+        tmp_path / "queue.json",
+        client=client,
+        power_state=PowerState(has_battery=True, percent=12, on_ac_power=True),
+    )
+
+    assert summary["formatted"] == 1
+    assert "battery_deferred" not in summary
+
+
+def test_battery_gate_skipped_when_nothing_pending(tmp_path: Path) -> None:
+    """An empty run returns the normal summary, not a battery deferral."""
+    vault = tmp_path / "vault"
+    vault.mkdir()  # no eligible notes
+    cfg = _make_cfg(vault)
+
+    summary = _run(
+        cfg,
+        tmp_path / "queue.json",
+        power_state=PowerState(has_battery=True, percent=5, on_ac_power=False),
+    )
+
+    assert "battery_deferred" not in summary
+    assert summary == {"enqueued": 0, "formatted": 0, "failed": 0, "skipped": 0}
