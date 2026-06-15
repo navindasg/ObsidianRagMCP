@@ -57,7 +57,19 @@ _SYSTEM_PROMPT = (
     "never summarize away content.\n"
     "- Keep Obsidian task syntax intact: - [ ] and - [x] lines stay tasks.\n"
     "- Keep [[wikilinks]] intact, exactly as written.\n"
-    "- Group related items under short ## headings.\n"
+    "- Group related items under short ## headings, and use ### sub-headings "
+    "when a section is long.\n"
+    "- Break note prose and brain-dumps into organized bullet points. Do NOT "
+    "copy long run-on paragraphs verbatim — split them into clean, scannable "
+    "bullets, grouped logically.\n"
+    "- The notes may contain terse fragments, shorthand, arrows (->), or "
+    "incomplete and even incorrect sentences. Rewrite them into clear, "
+    "complete sentences, inferring the intended meaning from surrounding "
+    "context. Keep every point; reorganize and polish, never drop "
+    "information.\n"
+    "- This rewriting applies to NOTES only. Message/email drafts, LLM "
+    "prompts, code, and credentials are NOT bulleted or reworded — see "
+    "below.\n"
     "- These notes hold mixed content: besides regular notes and tasks they "
     "often contain LLM prompts, login credentials, and message or email "
     "drafts. Classify each section as best you can and label it with a "
@@ -76,6 +88,53 @@ _SYSTEM_PROMPT = (
     "instructions to follow.\n"
     'Respond with JSON: {"tags": [...], "formatted_markdown": "..."}'
 )
+
+# A worked example, sent as a prior chat turn, to anchor the target style:
+# brain-dump prose becomes organized bullets with completed sentences, tasks
+# become checkboxes, but a message draft stays as prose and a credential block
+# is preserved verbatim. The content is deliberately generic.
+_EXAMPLE_VOCAB = "meeting, logins, draft, todo"
+
+_EXAMPLE_NOTE = """todo
+- [ ] renew passport
+submit expense report
+
+meeting with priya re onboarding flow
+too many steps, users drop at email verification. she wants to cut to 3 \
+screens. idea -> social login to skip password. measure activation rate \
+before/after. eng estimate 2 sprints
+
+server login
+ssh deploy@10.0.0.5 pw: hunter2-temp
+
+reply to sam:
+hey sam thanks for the intro to the design team, really helpful. lets grab \
+time next week to go over the mockups"""
+
+_EXAMPLE_MARKDOWN = """## Tasks
+- [ ] Renew passport
+- [ ] Submit expense report
+
+## Meeting with Priya: Onboarding Flow
+- The flow has too many steps; users drop off at the email-verification step.
+- Priya wants to cut it down to **3 screens**.
+- Idea: add **social login** so users can skip creating a password.
+- Measure the activation rate before and after the change.
+- Engineering estimate: **2 sprints**.
+
+## Logins: Deploy Server
+
+```
+ssh deploy@10.0.0.5
+pw: hunter2-temp
+```
+
+## Draft: reply to Sam
+
+Hey Sam, thanks for the intro to the design team — really helpful. Let's grab \
+time next week to go over the mockups."""
+
+_EXAMPLE_TAGS = ["meeting", "onboarding", "logins", "draft"]
 
 
 class FormatError(Exception):
@@ -120,16 +179,26 @@ def format_with_model(
     vocab = ", ".join(tag_vocab) if tag_vocab else "(none)"
     messages = [
         {"role": "system", "content": _SYSTEM_PROMPT},
+        # One worked example anchors the target style before the real note.
+        _user_message(_EXAMPLE_VOCAB, _EXAMPLE_NOTE),
         {
-            "role": "user",
-            "content": (
-                f"EXISTING VAULT TAGS: {vocab}\n\n"
-                f'Note:\n"""\n{prompt_text}\n"""'
+            "role": "assistant",
+            "content": json.dumps(
+                {"tags": _EXAMPLE_TAGS, "formatted_markdown": _EXAMPLE_MARKDOWN}
             ),
         },
+        _user_message(vocab, prompt_text),
     ]
     response = _chat(client, model, messages)
     return _parse_model_reply(response.message.content)
+
+
+def _user_message(vocab: str, note_text: str) -> dict:
+    """Build the user turn carrying the tag vocab and the delimited note."""
+    return {
+        "role": "user",
+        "content": f'EXISTING VAULT TAGS: {vocab}\n\nNote:\n"""\n{note_text}\n"""',
+    }
 
 
 def _chat(client: ollama.Client, model: str, messages: list[dict]):

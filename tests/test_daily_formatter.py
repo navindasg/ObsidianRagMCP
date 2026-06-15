@@ -133,9 +133,10 @@ def test_chat_called_with_schema_and_options() -> None:
 
     messages = kwargs["messages"]
     assert messages[0]["role"] == "system"
-    assert messages[1]["role"] == "user"
+    # The real note is the LAST message (few-shot examples sit in between).
+    assert messages[-1]["role"] == "user"
     system = messages[0]["content"]
-    user = messages[1]["content"]
+    user = messages[-1]["content"]
     # Rules live in the system prompt.
     assert "- [ ]" in system and "- [x]" in system
     assert "[[" in system  # wikilinks rule
@@ -144,6 +145,34 @@ def test_chat_called_with_schema_and_options() -> None:
     assert '"""\nraw note text\n"""' in user
     assert "EXISTING VAULT TAGS" in user
     assert "work, ideas" in user
+
+
+def test_fewshot_examples_precede_the_real_note() -> None:
+    """A worked example teaches notes->bullets while keeping drafts as prose."""
+    client = _make_client(_json_reply(["work"], "body"))
+
+    format_with_model(client, "m", "raw note text", [])
+
+    messages = client.chat.call_args.kwargs["messages"]
+    assert messages[0]["role"] == "system"
+    assert messages[-1]["role"] == "user"
+    assert '"""\nraw note text\n"""' in messages[-1]["content"]
+
+    # Example user turns mirror the real prompt format.
+    example_users = [m for m in messages[1:-1] if m["role"] == "user"]
+    assert example_users
+    assert all("EXISTING VAULT TAGS" in m["content"] for m in example_users)
+
+    # An example assistant turn is valid JSON demonstrating the target style:
+    # notes broken into bullets, a draft kept as prose, code/login verbatim.
+    example_assistants = [m for m in messages[1:-1] if m["role"] == "assistant"]
+    assert example_assistants
+    parsed = json.loads(example_assistants[0]["content"])
+    body = parsed["formatted_markdown"]
+    assert "\n- " in body  # notes rendered as bullets
+    assert "## Draft:" in body  # a draft section, preserved as prose
+    assert "```" in body  # verbatim code/login block
+    assert isinstance(parsed["tags"], list) and parsed["tags"]
 
 
 # ---------------------------------------------------------------------------
