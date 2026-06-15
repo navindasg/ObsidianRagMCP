@@ -251,8 +251,25 @@ def test_dry_run_enqueues_and_reports_but_formats_nothing(
         "failed": 0,
     }
     assert (vault / "2026-06-11.md").read_text(encoding="utf-8") == RAW_NOTE
-    reloaded = FormatQueue.load(queue_path)
-    assert len(reloaded.items) == 1
+    # A dry run is read-only: nothing is persisted to the queue.
+    assert not queue_path.exists() or FormatQueue.load(queue_path).items == ()
+
+
+def test_dry_run_since_does_not_leak_latest_into_later_run(
+    vault: Path, queue_path: Path
+) -> None:
+    """A dry --since must not queue the latest note for a later auto run."""
+    (vault / "2026-06-12.md").write_text(RAW_NOTE, encoding="utf-8")  # lone latest
+    cfg = _make_cfg(vault)
+
+    preview = _run(
+        cfg, queue_path, client=None, dry_run=True, since=datetime.date(2026, 1, 1)
+    )
+    assert preview["pending"] == ["2026-06-12.md"]  # --since would include it
+
+    # A subsequent automatic run (no --since) holds the lone latest note back.
+    auto = _run(cfg, queue_path, client=None)
+    assert auto == {"enqueued": 0, "formatted": 0, "failed": 0, "skipped": 0}
 
 
 # ---------------------------------------------------------------------------

@@ -75,18 +75,21 @@ def run_format_daily(
     if not tags_only:
         enqueued += _enqueue_candidates(cfg, queue, since=since)
     enqueued += _enqueue_tagged(cfg, queue, dry_run=dry_run)
-    queue.save()
     pending = queue.pending(cfg.daily_format.max_retries)
     if tags_only:
         pending = [item for item in pending if item.kind == "tagged"]
 
     if dry_run:
+        # A dry run is read-only: report what would happen without persisting
+        # the queue or touching notes (so a dry --since never leaks the
+        # latest note into a later automatic run).
         return {
             "enqueued": enqueued,
             "pending": [item.rel_path for item in pending],
             "formatted": 0,
             "failed": 0,
         }
+    queue.save()
     if not pending:
         logger.info("No pending daily notes to format")
         return {"enqueued": enqueued, "formatted": 0, "failed": 0, "skipped": 0}
