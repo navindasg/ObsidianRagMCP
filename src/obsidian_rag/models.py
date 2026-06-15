@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -88,9 +87,6 @@ class DailyFormatConfig(BaseModel):
     model: str | None = Field(default=None)  # None = auto-select from pulled models
     schedule_hour: int = Field(default=0, ge=0, le=23)
     schedule_minute: int = Field(default=30, ge=0, le=59)
-    # No-backfill cutoff; None = recorded on first run.
-    start_date: datetime.date | None = Field(default=None)
-    catchup_days: int = Field(default=14, gt=0)
     max_retries: int = Field(default=3, gt=0)
     # Notes never formatted: filename stems or vault-relative paths,
     # the .md suffix optional in either form.

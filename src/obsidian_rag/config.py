@@ -53,8 +53,6 @@ vaults:
 #   model: null
 #   schedule_hour: 0
 #   schedule_minute: 30
-#   start_date: null
-#   catchup_days: 14
 #   max_retries: 3
 #   blacklist: []
 #   format_tag: "#!format"

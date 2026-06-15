@@ -2,10 +2,8 @@
 
 Covers the daily_format configuration model in models.py, its wiring into
 AppConfig, the commented daily_format section in DEFAULT_CONFIG, and YAML
-round-tripping through load_config (including ISO start_date parsing).
+round-tripping through load_config.
 """
-import datetime
-
 import pytest
 import yaml
 from pydantic import ValidationError
@@ -42,8 +40,6 @@ def test_defaults():
     assert cfg.model is None
     assert cfg.schedule_hour == 0
     assert cfg.schedule_minute == 30
-    assert cfg.start_date is None
-    assert cfg.catchup_days == 14
     assert cfg.max_retries == 3
     assert cfg.blacklist == []
 
@@ -72,13 +68,6 @@ def test_schedule_minute_out_of_range_rejected(minute):
     """schedule_minute outside 0-59 fails validation."""
     with pytest.raises(ValidationError):
         DailyFormatConfig(schedule_minute=minute)
-
-
-@pytest.mark.parametrize("days", [0, -1])
-def test_catchup_days_non_positive_rejected(days):
-    """catchup_days must be strictly positive."""
-    with pytest.raises(ValidationError):
-        DailyFormatConfig(catchup_days=days)
 
 
 @pytest.mark.parametrize("retries", [0, -3])
@@ -129,33 +118,6 @@ def test_empty_daily_format_section_uses_defaults(tmp_path):
     cfg = load_config(str(config_file))
 
     assert cfg.daily_format == DailyFormatConfig()
-
-
-# ---------------------------------------------------------------------------
-# start_date parsing from YAML
-# ---------------------------------------------------------------------------
-
-
-def test_start_date_iso_string_parses_to_date(tmp_path):
-    """An ISO date string from YAML parses to a datetime.date."""
-    config_file = tmp_path / "config.yaml"
-    _write_config(
-        config_file,
-        {
-            "vaults": _vaults_section(tmp_path),
-            "daily_format": {"start_date": "2026-01-15"},
-        },
-    )
-
-    cfg = load_config(str(config_file))
-
-    assert cfg.daily_format.start_date == datetime.date(2026, 1, 15)
-
-
-def test_start_date_invalid_string_rejected():
-    """A non-date string for start_date fails validation."""
-    with pytest.raises(ValidationError):
-        DailyFormatConfig(start_date="not-a-date")
 
 
 # ---------------------------------------------------------------------------

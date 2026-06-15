@@ -1,17 +1,18 @@
 """Tests for the nightly daily-format runner (daily_format/runner.py).
 
+Eligibility is successor-based: a daily note is formatted once a later-dated
+daily note exists, and the most recent note is always held back. Calendar
+time never matters. `--since` is the manual backfill that lifts the hold.
+
 Tests:
-  1. happy path: yesterday's note formatted, today's note untouched
-  2. start_date honored: notes before start_date are never enqueued
-  3. first run records start_date == today, so nothing is backfilled
-  4. ollama down: items stay queued, summary carries ollama_down=True
-  5. per-item failure increments attempts and the run continues
-  6. dry-run reports but formats nothing and never builds a client
-  7. re-run after success enqueues nothing (idempotent)
-  8. stale queue item for an already-formatted note is marked done
-  9. queue item for an unknown vault is left parked with a warning
- 10. queue item whose rel_path escapes the vault is dropped
- 11. queue item dated today (not yet past) is skipped and marked done
+  1. happy path: an older note formats, the latest is held back
+  2. ollama down: items stay queued, summary carries ollama_down=True
+  3. per-item failure increments attempts and the run continues
+  4. dry-run reports but formats nothing and never builds a client
+  5. re-run after success enqueues nothing (idempotent)
+  6. stale queue item for an already-formatted note is marked done
+  7. queue item for an unknown vault is left parked with a warning
+  8. queue item whose rel_path escapes the vault is dropped
 """
 
 from __future__ import annotations
@@ -28,11 +29,9 @@ from obsidian_rag.daily_format.queue import FormatQueue, QueueItem
 from obsidian_rag.daily_format.runner import run_format_daily
 from obsidian_rag.models import AppConfig
 
-TODAY = datetime.date(2026, 6, 12)
-YESTERDAY = datetime.date(2026, 6, 11)
-START = datetime.date(2026, 6, 1)
-
 RAW_NOTE = "- [ ] call [[Alice]]\nidea about the garden\n"
+# A later-dated note that is itself held back, making older notes eligible.
+SUCCESSOR = "2026-06-30.md"
 
 
 # ---------------------------------------------------------------------------
@@ -41,11 +40,16 @@ RAW_NOTE = "- [ ] call [[Alice]]\nidea about the garden\n"
 
 
 def _make_cfg(vault_dir: Path, **daily_overrides: Any) -> AppConfig:
-    daily: dict[str, Any] = {"enabled": True, "start_date": START, **daily_overrides}
+    daily: dict[str, Any] = {"enabled": True, **daily_overrides}
     return AppConfig(
         vaults=[{"name": "vault", "path": str(vault_dir)}],
         daily_format=daily,
     )
+
+
+def _add_successor(vault_dir: Path) -> None:
+    """Drop in a latest-dated note so older notes have a successor."""
+    (vault_dir / SUCCESSOR).write_text("latest, held back\n", encoding="utf-8")
 
 
 def _reply(tags: list[str], body: str) -> str:
@@ -69,7 +73,6 @@ def _run(
     queue_path: Path,
     *,
     client: MagicMock | None = None,
-    today: datetime.date = TODAY,
     dry_run: bool = False,
     tags_only: bool = False,
     since: datetime.date | None = None,
@@ -111,7 +114,6 @@ def _run(
         return run_format_daily(
             cfg,
             queue_path=queue_path,
-            today=today,
             dry_run=dry_run,
             tags_only=tags_only,
             since=since,
@@ -119,7 +121,7 @@ def _run(
 
 
 def _seed_queue(queue_path: Path, *items: QueueItem) -> None:
-    queue = FormatQueue(queue_path, start_date=START)
+    queue = FormatQueue(queue_path)
     for item in items:
         queue.enqueue(item)
     queue.save()
@@ -138,13 +140,13 @@ def queue_path(tmp_path: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Test 1: happy path
+# Test 1: happy path — an older note formats, the latest is held back
 # ---------------------------------------------------------------------------
 
 
-def test_yesterday_formatted_today_untouched(vault: Path, queue_path: Path) -> None:
+def test_older_note_formatted_latest_held(vault: Path, queue_path: Path) -> None:
     (vault / "2026-06-11.md").write_text(RAW_NOTE, encoding="utf-8")
-    (vault / "2026-06-12.md").write_text("today raw\n", encoding="utf-8")
+    (vault / "2026-06-12.md").write_text("latest raw\n", encoding="utf-8")
     cfg = _make_cfg(vault)
     client = _client_with_replies(_reply(["garden"], "## Tasks\n- [ ] call [[Alice]]"))
 
@@ -155,40 +157,24 @@ def test_yesterday_formatted_today_untouched(vault: Path, queue_path: Path) -> N
     assert formatted.startswith("---\n")
     assert "## Original Notes" in formatted
     assert RAW_NOTE.strip() in formatted
-    assert (vault / "2026-06-12.md").read_text(encoding="utf-8") == "today raw\n"
+    # The most recent note is held back untouched.
+    assert (vault / "2026-06-12.md").read_text(encoding="utf-8") == "latest raw\n"
     assert FormatQueue.load(queue_path).items == ()
 
 
 # ---------------------------------------------------------------------------
-# Test 2: start_date floor
+# Test 2: a lone note (no successor) is never enqueued
 # ---------------------------------------------------------------------------
 
 
-def test_note_before_start_date_never_enqueued(vault: Path, queue_path: Path) -> None:
+def test_lone_note_held_back(vault: Path, queue_path: Path) -> None:
     (vault / "2026-06-11.md").write_text(RAW_NOTE, encoding="utf-8")
-    cfg = _make_cfg(vault, start_date=TODAY)
+    cfg = _make_cfg(vault)
 
     summary = _run(cfg, queue_path, client=None)
 
     assert summary == {"enqueued": 0, "formatted": 0, "failed": 0, "skipped": 0}
     assert (vault / "2026-06-11.md").read_text(encoding="utf-8") == RAW_NOTE
-
-
-# ---------------------------------------------------------------------------
-# Test 3: first run records start_date (no backfill)
-# ---------------------------------------------------------------------------
-
-
-def test_first_run_records_start_date_and_backfills_nothing(
-    vault: Path, queue_path: Path
-) -> None:
-    (vault / "2026-06-11.md").write_text(RAW_NOTE, encoding="utf-8")
-    cfg = _make_cfg(vault, start_date=None)
-
-    summary = _run(cfg, queue_path, client=None)
-
-    assert summary == {"enqueued": 0, "formatted": 0, "failed": 0, "skipped": 0}
-    assert FormatQueue.load(queue_path).start_date == TODAY
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +184,7 @@ def test_first_run_records_start_date_and_backfills_nothing(
 
 def test_ollama_down_leaves_items_queued(vault: Path, queue_path: Path) -> None:
     (vault / "2026-06-11.md").write_text(RAW_NOTE, encoding="utf-8")
+    _add_successor(vault)
     cfg = _make_cfg(vault)
 
     summary = _run(
@@ -227,6 +214,7 @@ def test_per_item_failure_increments_attempts_and_continues(
 ) -> None:
     (vault / "2026-06-10.md").write_text("older note\n", encoding="utf-8")
     (vault / "2026-06-11.md").write_text(RAW_NOTE, encoding="utf-8")
+    _add_successor(vault)
     cfg = _make_cfg(vault)
     # First reply (for 2026-06-10) is invalid JSON -> FormatError; second is valid.
     client = _client_with_replies("not json at all", _reply(["x"], "## Clean"))
@@ -251,6 +239,7 @@ def test_dry_run_enqueues_and_reports_but_formats_nothing(
     vault: Path, queue_path: Path
 ) -> None:
     (vault / "2026-06-11.md").write_text(RAW_NOTE, encoding="utf-8")
+    _add_successor(vault)
     cfg = _make_cfg(vault)
 
     summary = _run(cfg, queue_path, client=None, dry_run=True)
@@ -273,6 +262,7 @@ def test_dry_run_enqueues_and_reports_but_formats_nothing(
 
 def test_rerun_after_success_enqueues_nothing(vault: Path, queue_path: Path) -> None:
     (vault / "2026-06-11.md").write_text(RAW_NOTE, encoding="utf-8")
+    _add_successor(vault)
     cfg = _make_cfg(vault)
     client = _client_with_replies(_reply(["x"], "## Clean"))
     first = _run(cfg, queue_path, client=client)
@@ -357,28 +347,6 @@ def test_traversal_rel_path_dropped(
 
 
 # ---------------------------------------------------------------------------
-# Test 11: item dated today is not yet eligible -> skipped + done
-# ---------------------------------------------------------------------------
-
-
-def test_item_dated_today_marked_done(vault: Path, queue_path: Path) -> None:
-    (vault / "2026-06-12.md").write_text("today raw\n", encoding="utf-8")
-    _seed_queue(
-        queue_path,
-        QueueItem(vault="vault", rel_path="2026-06-12.md", note_date="2026-06-12"),
-    )
-    cfg = _make_cfg(vault)
-    client = MagicMock()
-
-    summary = _run(cfg, queue_path, client=client)
-
-    assert summary == {"enqueued": 0, "formatted": 0, "failed": 0, "skipped": 1}
-    client.chat.assert_not_called()
-    assert (vault / "2026-06-12.md").read_text(encoding="utf-8") == "today raw\n"
-    assert FormatQueue.load(queue_path).items == ()
-
-
-# ---------------------------------------------------------------------------
 # Test 12: blacklisted daily note is never enqueued
 # ---------------------------------------------------------------------------
 
@@ -388,6 +356,7 @@ def test_blacklisted_note_never_enqueued(tmp_path: Path) -> None:
     vault.mkdir()
     (vault / "2026-06-11.md").write_text(RAW_NOTE, encoding="utf-8")
     (vault / "2026-06-10.md").write_text(RAW_NOTE, encoding="utf-8")
+    _add_successor(vault)
     cfg = _make_cfg(vault, blacklist=["2026-06-10"])
 
     summary = _run(cfg, tmp_path / "queue.json", dry_run=True)
@@ -440,7 +409,7 @@ def test_dry_run_reports_tagged_note_but_keeps_marker(tmp_path: Path) -> None:
 
 
 def test_tagged_daily_note_stripped_but_not_fast_tracked(tmp_path: Path) -> None:
-    """The marker on a daily note is consumed; dailies keep the next-day rule."""
+    """The marker on a daily note is consumed; dailies keep the successor rule."""
     vault = tmp_path / "vault"
     vault.mkdir()
     today_note = vault / "2026-06-12.md"
@@ -575,11 +544,11 @@ def test_tags_only_leaves_queued_daily_items_untouched(tmp_path: Path) -> None:
     assert [item["rel_path"] for item in state["items"]] == ["2026-06-11.md"]
 
 
-def test_since_backfills_past_start_date_and_catchup(tmp_path: Path) -> None:
-    """--since formats notes older than both start_date and catchup_days."""
+def test_since_backfills_a_lone_old_note(tmp_path: Path) -> None:
+    """--since formats even a single, very old note (lifts the latest hold)."""
     vault = tmp_path / "vault"
     vault.mkdir()
-    old = vault / "2026-03-20.md"  # before START (06-01) and outside catchup 14
+    old = vault / "2026-03-20.md"
     old.write_text(RAW_NOTE, encoding="utf-8")
     cfg = _make_cfg(vault)
     client = _client_with_replies(_reply(["notes"], "## Notes\nbody"))
@@ -596,21 +565,22 @@ def test_since_backfills_past_start_date_and_catchup(tmp_path: Path) -> None:
     assert "## Original Notes" in old.read_text(encoding="utf-8")
 
 
-def test_since_still_respects_blacklist_and_next_day(tmp_path: Path) -> None:
-    """A backfill never touches blacklisted notes or today's note."""
+def test_since_lifts_the_latest_hold_but_respects_blacklist(tmp_path: Path) -> None:
+    """--since formats the most recent note too, but never blacklisted ones."""
     vault = tmp_path / "vault"
     vault.mkdir()
-    (vault / "2026-06-10.md").write_text(RAW_NOTE, encoding="utf-8")
-    today_note = vault / "2026-06-12.md"
-    today_note.write_text(RAW_NOTE, encoding="utf-8")
+    (vault / "2026-06-10.md").write_text(RAW_NOTE, encoding="utf-8")  # blacklisted
+    (vault / "2026-06-11.md").write_text(RAW_NOTE, encoding="utf-8")
+    (vault / "2026-06-12.md").write_text(RAW_NOTE, encoding="utf-8")  # latest
     cfg = _make_cfg(vault, blacklist=["2026-06-10"])
 
     summary = _run(
         cfg, tmp_path / "queue.json", dry_run=True, since=datetime.date(2026, 3, 19)
     )
 
-    assert summary["enqueued"] == 0
-    assert summary["pending"] == []
+    # The latest note (06-12) IS included under --since; the blacklisted one is not.
+    assert summary["enqueued"] == 2
+    assert summary["pending"] == ["2026-06-11.md", "2026-06-12.md"]
 
 
 # ---------------------------------------------------------------------------
@@ -625,6 +595,7 @@ def test_low_battery_defers_without_touching_ollama(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     vault.mkdir()
     (vault / "2026-06-11.md").write_text(RAW_NOTE, encoding="utf-8")
+    _add_successor(vault)
     cfg = _make_cfg(vault)
     queue_path = tmp_path / "queue.json"
 
@@ -650,6 +621,7 @@ def test_low_battery_on_ac_proceeds(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     vault.mkdir()
     (vault / "2026-06-11.md").write_text(RAW_NOTE, encoding="utf-8")
+    _add_successor(vault)
     cfg = _make_cfg(vault)
     client = _client_with_replies(_reply(["t"], "## B"))
 

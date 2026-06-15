@@ -1,12 +1,14 @@
 """Orchestrates one nightly daily-note formatting run.
 
 Public API:
-    run_format_daily(cfg, *, queue_path=None, today=None, dry_run=False) -> dict
+    run_format_daily(cfg, *, queue_path=None, dry_run=False, tags_only=False,
+        since=None) -> dict
 
-Flow: scan every vault for raw daily notes, enqueue them in the persistent
-format queue, then drain the queue against a local Ollama chat model. The
-queue survives sleep and failures; an unreachable Ollama simply leaves items
-queued for the next run, and one item's failure never aborts the run.
+Flow: scan every vault for raw daily notes (those with a later-dated
+successor), enqueue them in the persistent format queue, then drain the
+queue against a local Ollama chat model. The queue survives sleep and
+failures; an unreachable Ollama simply leaves items queued for the next
+run, and one item's failure never aborts the run.
 """
 
 from __future__ import annotations
@@ -37,25 +39,27 @@ def run_format_daily(
     cfg: AppConfig,
     *,
     queue_path: Path | None = None,
-    today: datetime.date | None = None,
     dry_run: bool = False,
     tags_only: bool = False,
     since: datetime.date | None = None,
 ) -> dict:
     """Run one formatting pass: enqueue candidates, then drain.
 
+    Eligibility is successor-based: a daily note is formatted once a
+    later-dated daily note exists, and the most recent note is held back.
+    Calendar time never matters.
+
     Args:
         cfg: Validated application config (daily_format section drives this).
         queue_path: Queue file location; defaults to default_queue_path().
-        today: Current date override for testing; defaults to date.today().
         dry_run: When True, enqueue and report but never touch Ollama or
             rewrite any note (the queue itself is still persisted).
         tags_only: When True (the background poll), skip the daily-note
             scan and drain only tagged items; queued daily items wait for
             the nightly run.
-        since: Deliberate backfill — overrides both start_date and the
-            catch-up window so every daily note dated on or after this date
-            becomes eligible. The blacklist and next-day rule still apply.
+        since: Manual backfill — formats every daily note dated on or after
+            this date, including the most recent (lifts the latest-note
+            hold). The blacklist still applies.
 
     Returns:
         Summary counts. Normal runs: {"enqueued", "formatted", "failed",
@@ -65,20 +69,11 @@ def run_format_daily(
         for low battery: {"enqueued", "formatted", "failed", "queued",
         "battery_deferred", "battery_percent"} with everything left queued.
     """
-    today = today if today is not None else datetime.date.today()
     queue = FormatQueue.load(queue_path if queue_path is not None else default_queue_path())
-    if since is not None:
-        start_date = since
-        catchup_days = max((today - since).days, 1)
-    else:
-        start_date = cfg.daily_format.start_date or queue.ensure_start_date(today)
-        catchup_days = cfg.daily_format.catchup_days
 
     enqueued = 0
     if not tags_only:
-        enqueued += _enqueue_candidates(
-            cfg, queue, today=today, start_date=start_date, catchup_days=catchup_days
-        )
+        enqueued += _enqueue_candidates(cfg, queue, since=since)
     enqueued += _enqueue_tagged(cfg, queue, dry_run=dry_run)
     queue.save()
     pending = queue.pending(cfg.daily_format.max_retries)
@@ -129,7 +124,7 @@ def run_format_daily(
             "ollama_down": True,
         }
 
-    counts = _drain(cfg, queue, pending, client=client, model=model, today=today)
+    counts = _drain(cfg, queue, pending, client=client, model=model)
     queue.save()
     return {"enqueued": enqueued, **counts}
 
@@ -138,9 +133,7 @@ def _enqueue_candidates(
     cfg: AppConfig,
     queue: FormatQueue,
     *,
-    today: datetime.date,
-    start_date: datetime.date,
-    catchup_days: int,
+    since: datetime.date | None,
 ) -> int:
     """Scan every vault for eligible raw daily notes and enqueue them."""
     daily = cfg.daily_format
@@ -150,12 +143,10 @@ def _enqueue_candidates(
             vault.path,
             daily_folder=daily.daily_folder,
             filename_format=daily.filename_format,
-            today=today,
-            start_date=start_date,
-            catchup_days=catchup_days,
             excluded_dirs=vault.excluded_dirs,
             excluded_patterns=vault.excluded_patterns,
             blacklist=daily.blacklist,
+            since=since,
         )
         for path in candidates:
             note_date = parse_note_date(path, daily.filename_format)
@@ -177,7 +168,7 @@ def _enqueue_tagged(cfg: AppConfig, queue: FormatQueue, *, dry_run: bool) -> int
     The marker is stripped as soon as the note is queued (the queue, not
     the marker, now carries the request) — except on dry runs, which never
     modify notes. Daily-pattern notes only have their marker consumed:
-    dailies are auto-scheduled and keep the next-day rule.
+    dailies are auto-scheduled by the successor rule.
     """
     daily = cfg.daily_format
     if daily.format_tag is None:
@@ -234,7 +225,6 @@ def _drain(
     *,
     client: ollama.Client,
     model: str,
-    today: datetime.date,
 ) -> dict[str, int]:
     """Format every pending item; one item's failure never aborts the run."""
     vaults = {vault.name: vault for vault in cfg.vaults}
@@ -259,7 +249,7 @@ def _drain(
             if item.note_date is not None
             else None
         )
-        if path is None or not _item_still_eligible(item, path, note_date, today):
+        if path is None or not _still_eligible(path):
             logger.info(
                 "Skipping %s/%s: no longer eligible", item.vault, item.rel_path
             )
@@ -300,25 +290,14 @@ def _resolve_in_vault(vault_root: Path, rel_path: str) -> Path | None:
     return candidate
 
 
-def _item_still_eligible(
-    item: QueueItem,
-    path: Path,
-    note_date: datetime.date | None,
-    today: datetime.date,
-) -> bool:
+def _still_eligible(path: Path) -> bool:
     """Re-check eligibility right before formatting (queue may be stale).
 
     A note is no longer eligible when the file vanished or it was formatted
-    in the meantime. Daily items additionally require their date to be in
-    the past (next-day rule); a daily item missing its date can only come
-    from a hand-edited queue file and is treated as ineligible. Tagged items
-    were opted in explicitly and have no date gate. Read errors other than
-    a missing file return True so format_file can surface them as a proper
-    FormatError.
+    in the meantime (the successor check that admitted it cannot change in
+    the seconds between scan and drain). Read errors other than a missing
+    file return True so format_file can surface them as a proper FormatError.
     """
-    if item.kind != "tagged":
-        if note_date is None or note_date >= today:
-            return False
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:

@@ -3,7 +3,6 @@
 Public API:
     QueueItem: frozen dataclass identifying one note to format.
     FormatQueue.load(path) -> FormatQueue
-    FormatQueue.ensure_start_date(today) -> datetime.date
     FormatQueue.enqueue(item) -> bool
     FormatQueue.pending(max_retries) -> list[QueueItem]
     FormatQueue.mark_done(item) -> None
@@ -11,16 +10,16 @@ Public API:
     FormatQueue.save() -> None
     default_queue_path() -> Path
 
-On-disk state: ``{"start_date": str|null, "items": [...]}``. The file is
-written atomically (temp file in the same directory + ``os.replace``) so a
-crash or sleep mid-write never leaves a partial queue. Missing or corrupt
-files are tolerated: the queue starts fresh and logs what happened.
+On-disk state: ``{"items": [...]}``. The file is written atomically (temp
+file in the same directory + ``os.replace``) so a crash or sleep mid-write
+never leaves a partial queue. Missing or corrupt files are tolerated: the
+queue starts fresh and logs what happened. A legacy ``start_date`` key from
+older versions is ignored on load.
 """
 
 from __future__ import annotations
 
 import dataclasses
-import datetime
 import json
 import logging
 import os
@@ -41,7 +40,7 @@ class QueueItem:
         note_date: ISO date (YYYY-MM-DD) the note covers; None for notes
             queued via the format tag, which have no date of their own.
         attempts: Number of failed formatting attempts so far.
-        kind: "daily" for scheduled daily notes (next-day rule applies),
+        kind: "daily" for scheduled daily notes (successor rule applies),
             "tagged" for notes opted in via the format tag (formatted on
             the next run).
     """
@@ -63,20 +62,18 @@ def default_queue_path() -> Path:
     return Path.home() / ".obsidian-rag" / "format_queue.json"
 
 
-def _parse_state(raw: object) -> tuple[datetime.date | None, tuple[QueueItem, ...]]:
-    """Parse the on-disk JSON state, raising ValueError on any bad shape."""
+def _parse_state(raw: object) -> tuple[QueueItem, ...]:
+    """Parse the on-disk JSON state, raising ValueError on any bad shape.
+
+    A legacy ``start_date`` key from older versions is ignored.
+    """
     if not isinstance(raw, dict):
         raise ValueError(f"expected a JSON object, got {type(raw).__name__}")
-
-    raw_start = raw.get("start_date")
-    start_date = (
-        datetime.date.fromisoformat(raw_start) if raw_start is not None else None
-    )
 
     raw_items = raw.get("items", [])
     if not isinstance(raw_items, list):
         raise ValueError("'items' is not a list")
-    items = tuple(
+    return tuple(
         QueueItem(
             vault=str(entry["vault"]),
             rel_path=str(entry["rel_path"]),
@@ -91,26 +88,20 @@ def _parse_state(raw: object) -> tuple[datetime.date | None, tuple[QueueItem, ..
         )
         for entry in raw_items
     )
-    return start_date, items
 
 
 class FormatQueue:
-    """Persistent, dedup-ing queue of daily notes awaiting formatting.
+    """Persistent, dedup-ing queue of notes awaiting formatting.
 
-    Mutating methods update in-memory state only; call :meth:`save` to
-    persist. The one exception is :meth:`ensure_start_date`, which persists
-    immediately so the no-backfill cutoff survives a first run that crashes
-    before any item completes.
+    Mutating methods update in-memory state only; call :meth:`save` to persist.
     """
 
     def __init__(
         self,
         path: Path,
-        start_date: datetime.date | None = None,
         items: tuple[QueueItem, ...] = (),
     ) -> None:
         self._path = path
-        self._start_date = start_date
         self._items = items
 
     @classmethod
@@ -121,7 +112,7 @@ class FormatQueue:
             return cls(path)
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-            start_date, items = _parse_state(raw)
+            items = _parse_state(raw)
         except (OSError, ValueError, TypeError, KeyError) as exc:
             logger.warning(
                 "Corrupt or unreadable queue file %s (%s); starting fresh",
@@ -129,29 +120,12 @@ class FormatQueue:
                 exc,
             )
             return cls(path)
-        return cls(path, start_date=start_date, items=items)
-
-    @property
-    def start_date(self) -> datetime.date | None:
-        """The recorded no-backfill cutoff, if any."""
-        return self._start_date
+        return cls(path, items=items)
 
     @property
     def items(self) -> tuple[QueueItem, ...]:
         """All queued items, including parked ones."""
         return self._items
-
-    def ensure_start_date(self, today: datetime.date) -> datetime.date:
-        """Return the stored start_date, recording and persisting today if absent.
-
-        This implements the no-backfill cutoff: only notes dated on or after
-        the first ever run are eligible for formatting.
-        """
-        if self._start_date is None:
-            self._start_date = today
-            self.save()
-            logger.info("Recorded daily-format start date %s", today.isoformat())
-        return self._start_date
 
     def enqueue(self, item: QueueItem) -> bool:
         """Add item unless one with the same (vault, rel_path) is queued."""
@@ -199,12 +173,7 @@ class FormatQueue:
         Mirrors ``_replace_atomically`` in indexer.py so a crash mid-write
         never leaves a truncated queue file behind.
         """
-        state = {
-            "start_date": (
-                self._start_date.isoformat() if self._start_date is not None else None
-            ),
-            "items": [dataclasses.asdict(item) for item in self._items],
-        }
+        state = {"items": [dataclasses.asdict(item) for item in self._items]}
         parent = self._path.parent
         parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(

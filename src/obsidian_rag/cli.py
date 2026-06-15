@@ -102,13 +102,6 @@ def _parse_override_date(date_str: str | None, flag: str) -> datetime.date | Non
     help="Enqueue and report, but do not call Ollama or rewrite notes",
 )
 @click.option(
-    "--date",
-    "date_str",
-    default=None,
-    metavar="YYYY-MM-DD",
-    help="Override today's date (for testing)",
-)
-@click.option(
     "--tags-only",
     is_flag=True,
     default=False,
@@ -119,13 +112,12 @@ def _parse_override_date(date_str: str | None, flag: str) -> datetime.date | Non
     "since_str",
     default=None,
     metavar="YYYY-MM-DD",
-    help="Backfill: format daily notes from this date on, ignoring "
-    "start_date and the catch-up window",
+    help="Backfill: format every daily note from this date on, including "
+    "the most recent (lifts the latest-note hold)",
 )
 def format_daily(
     config_path: str,
     dry_run: bool,
-    date_str: str | None,
     tags_only: bool,
     since_str: str | None,
 ) -> None:
@@ -142,10 +134,9 @@ def format_daily(
             "Fix: enable daily_format in config "
             "(set daily_format.enabled: true)"
         )
-    today = _parse_override_date(date_str, "--date")
     since = _parse_override_date(since_str, "--since")
     summary = run_format_daily(
-        cfg, today=today, dry_run=dry_run, tags_only=tags_only, since=since
+        cfg, dry_run=dry_run, tags_only=tags_only, since=since
     )
     rendered = " ".join(f"{key}={value}" for key, value in summary.items())
     click.echo(f"format-daily: {rendered}", err=True)

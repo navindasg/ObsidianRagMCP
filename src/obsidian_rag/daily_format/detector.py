@@ -1,12 +1,19 @@
 """Daily-note candidate detection for the nightly formatter.
 
+A daily note becomes eligible for formatting once a later-dated daily note
+exists in the same folder — the single most recent note is always held back,
+since it may still be in progress. Calendar time is irrelevant: a note from
+years ago is formatted the moment any later note appears. The `since`
+override is the manual escape hatch, formatting every note on/after a date
+including the most recent.
+
 Public API:
     parse_note_date(path, filename_format) -> datetime.date | None
     is_already_formatted(text) -> bool
     is_blacklisted(rel_path, blacklist) -> bool
-    find_candidates(vault_root, *, daily_folder, filename_format, today,
-        start_date, catchup_days, excluded_dirs, excluded_patterns,
-        blacklist=()) -> list[Path]
+    find_candidates(vault_root, *, daily_folder, filename_format,
+        excluded_dirs, excluded_patterns, blacklist=(), since=None)
+        -> list[Path]
 """
 
 from __future__ import annotations
@@ -126,30 +133,29 @@ def find_candidates(
     *,
     daily_folder: str,
     filename_format: str,
-    today: datetime.date,
-    start_date: datetime.date,
-    catchup_days: int,
     excluded_dirs: list[str],
     excluded_patterns: list[str],
     blacklist: Sequence[str] = (),
+    since: datetime.date | None = None,
 ) -> list[Path]:
     """Scan the daily folder for raw daily notes that need formatting.
 
-    A note is eligible when its stem parses to a date d with
-    max(start_date, today - catchup_days) <= d < today, it is not excluded
-    by the vault's exclusion rules, it is not blacklisted, and it is not
-    already formatted. Unreadable files are skipped with a warning.
+    A note is eligible when its stem parses to a date, it is not excluded,
+    not blacklisted, not already formatted, and it has a strictly later-dated
+    sibling — the most recent note is held back. Calendar time never matters.
+    When `since` is given, the latest-note hold is lifted and every note dated
+    on or after `since` is eligible instead (manual backfill).
 
     Args:
         vault_root: Root directory of the Obsidian vault.
         daily_folder: Folder of daily notes relative to vault_root; "" means
             the vault root itself. Scanned non-recursively.
         filename_format: strftime format the daily-note stems follow.
-        today: Current date; notes dated today or later are never eligible.
-        start_date: No-backfill floor; notes before this date are skipped.
-        catchup_days: Maximum age in days of notes to pick up after downtime.
         excluded_dirs: Directory names excluded from indexing.
         excluded_patterns: Filename globs excluded from indexing.
+        blacklist: Notes never formatted (stems or vault-relative paths).
+        since: Manual backfill floor; when set, format every note dated on or
+            after it, including the most recent (overrides the latest hold).
 
     Returns:
         Eligible note paths sorted by note date ascending.
@@ -159,23 +165,27 @@ def find_candidates(
         logger.warning("Daily-note folder does not exist: %s", daily_dir)
         return []
 
-    earliest = max(start_date, today - datetime.timedelta(days=catchup_days))
-    dated_notes = (
-        (parse_note_date(md_file, filename_format), md_file)
+    dated = [
+        (note_date, md_file)
         for md_file in daily_dir.glob("*.md")
         if md_file.is_file()
-    )
-    eligible = [
-        (note_date, md_file)
-        for note_date, md_file in dated_notes
-        if note_date is not None
-        and earliest <= note_date < today
+        and (note_date := parse_note_date(md_file, filename_format)) is not None
         and not is_excluded(
             md_file.relative_to(vault_root), excluded_dirs, excluded_patterns
         )
         and not is_blacklisted(md_file.relative_to(vault_root), blacklist)
-        and _is_readable_raw_note(md_file)
     ]
+    if not dated:
+        return []
+
+    if since is not None:
+        in_window = [(d, f) for d, f in dated if d >= since]
+    else:
+        # Hold back the single most recent note; format every older one.
+        latest = max(d for d, _ in dated)
+        in_window = [(d, f) for d, f in dated if d < latest]
+
+    eligible = [(d, f) for d, f in in_window if _is_readable_raw_note(f)]
     return [md_file for _, md_file in sorted(eligible)]
 
 

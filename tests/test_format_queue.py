@@ -1,11 +1,10 @@
 """Tests for the persistent daily-format queue.
 
 Covers round-trip persistence, corrupt-file recovery, dedupe on
-(vault, rel_path), the no-backfill start_date cutoff, retry counting and
-parking, atomic writes (temp-then-replace), and the default queue path.
+(vault, rel_path), retry counting and parking, atomic writes
+(temp-then-replace), and the default queue path.
 """
 import dataclasses
-import datetime
 import json
 import logging
 
@@ -56,11 +55,10 @@ def test_queue_item_default_attempts():
 
 
 def test_load_missing_file_starts_fresh(tmp_path):
-    """A missing queue file yields an empty queue with no start_date."""
+    """A missing queue file yields an empty queue."""
     queue = FormatQueue.load(tmp_path / "format_queue.json")
 
     assert queue.items == ()
-    assert queue.start_date is None
 
 
 def test_load_corrupt_json_starts_fresh(tmp_path, caplog):
@@ -72,7 +70,6 @@ def test_load_corrupt_json_starts_fresh(tmp_path, caplog):
         queue = FormatQueue.load(path)
 
     assert queue.items == ()
-    assert queue.start_date is None
     assert any("format_queue" in r.message or "queue" in r.message.lower()
                for r in caplog.records)
 
@@ -86,8 +83,28 @@ def test_load_wrong_structure_starts_fresh(tmp_path, caplog):
         queue = FormatQueue.load(path)
 
     assert queue.items == ()
-    assert queue.start_date is None
     assert len(caplog.records) >= 1
+
+
+def test_load_ignores_legacy_start_date_key(tmp_path):
+    """A legacy start_date key from older versions is ignored, not an error."""
+    path = tmp_path / "format_queue.json"
+    path.write_text(
+        json.dumps(
+            {
+                "start_date": "2026-06-01",
+                "items": [
+                    {"vault": "main", "rel_path": "2026-06-11.md", "note_date": "2026-06-11"}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    queue = FormatQueue.load(path)
+
+    assert not hasattr(queue, "start_date")
+    assert queue.items[0].rel_path == "2026-06-11.md"
 
 
 # ---------------------------------------------------------------------------
@@ -96,10 +113,9 @@ def test_load_wrong_structure_starts_fresh(tmp_path, caplog):
 
 
 def test_round_trip_persistence(tmp_path):
-    """Items and start_date survive save() + load()."""
+    """Items survive save() + load()."""
     path = tmp_path / "format_queue.json"
     queue = FormatQueue.load(path)
-    queue.ensure_start_date(datetime.date(2026, 6, 10))
     assert queue.enqueue(_item(rel_path="2026-06-10.md", note_date="2026-06-10"))
     assert queue.enqueue(
         _item(rel_path="2026-06-11.md", note_date="2026-06-11", attempts=2)
@@ -108,7 +124,6 @@ def test_round_trip_persistence(tmp_path):
 
     reloaded = FormatQueue.load(path)
 
-    assert reloaded.start_date == datetime.date(2026, 6, 10)
     assert reloaded.items == (
         QueueItem(vault="main", rel_path="2026-06-10.md", note_date="2026-06-10"),
         QueueItem(
@@ -118,7 +133,7 @@ def test_round_trip_persistence(tmp_path):
 
 
 def test_disk_format_shape(tmp_path):
-    """On-disk state is {"start_date": str|null, "items": [...]}."""
+    """On-disk state is {"items": [...]} — no start_date key."""
     path = tmp_path / "format_queue.json"
     queue = FormatQueue.load(path)
     queue.enqueue(_item())
@@ -126,8 +141,7 @@ def test_disk_format_shape(tmp_path):
 
     raw = json.loads(path.read_text(encoding="utf-8"))
 
-    assert set(raw) == {"start_date", "items"}
-    assert raw["start_date"] is None
+    assert set(raw) == {"items"}
     assert raw["items"] == [
         {
             "vault": "main",
@@ -151,34 +165,6 @@ def test_save_creates_parent_dirs_and_leaves_no_temp_files(tmp_path):
     assert leftovers == []
     # Final file is complete, valid JSON (temp-then-replace, never partial).
     assert json.loads(path.read_text(encoding="utf-8"))["items"]
-
-
-# ---------------------------------------------------------------------------
-# start_date (no-backfill cutoff)
-# ---------------------------------------------------------------------------
-
-
-def test_ensure_start_date_records_today_and_persists(tmp_path):
-    """First call records today, persists it, and returns it."""
-    path = tmp_path / "format_queue.json"
-    queue = FormatQueue.load(path)
-    today = datetime.date(2026, 6, 12)
-
-    assert queue.ensure_start_date(today) == today
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    assert raw["start_date"] == "2026-06-12"
-
-
-def test_ensure_start_date_stable_across_calls_and_loads(tmp_path):
-    """start_date is recorded once and never moves on later calls or reloads."""
-    path = tmp_path / "format_queue.json"
-    queue = FormatQueue.load(path)
-    first = queue.ensure_start_date(datetime.date(2026, 6, 12))
-
-    assert queue.ensure_start_date(datetime.date(2026, 7, 1)) == first
-
-    reloaded = FormatQueue.load(path)
-    assert reloaded.ensure_start_date(datetime.date(2026, 8, 1)) == first
 
 
 # ---------------------------------------------------------------------------

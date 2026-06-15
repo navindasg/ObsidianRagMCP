@@ -198,7 +198,7 @@ def test_format_daily_invokes_runner_and_exits_zero(daily_config_file):
     mock_run.assert_called_once()
     kwargs = mock_run.call_args.kwargs
     assert kwargs["dry_run"] is False
-    assert kwargs["today"] is None
+    assert kwargs["since"] is None
     assert "formatted=1" in result.stderr
 
 
@@ -214,41 +214,18 @@ def test_format_daily_exits_one_on_failures(daily_config_file):
     assert result.exit_code == 1
 
 
-def test_format_daily_passes_dry_run_and_date(daily_config_file):
-    """--dry-run and --date are forwarded to run_format_daily."""
+def test_format_daily_passes_dry_run(daily_config_file):
+    """--dry-run is forwarded to run_format_daily."""
     summary = {"enqueued": 0, "pending": [], "formatted": 0, "failed": 0}
     runner = CliRunner()
     with patch("obsidian_rag.cli.run_format_daily", return_value=summary) as mock_run:
         result = runner.invoke(
             cli,
-            [
-                "format-daily",
-                "--config",
-                str(daily_config_file),
-                "--dry-run",
-                "--date",
-                "2026-06-12",
-            ],
+            ["format-daily", "--config", str(daily_config_file), "--dry-run"],
         )
 
     assert result.exit_code == 0, result.output
-    kwargs = mock_run.call_args.kwargs
-    assert kwargs["dry_run"] is True
-    assert kwargs["today"] == datetime.date(2026, 6, 12)
-
-
-def test_format_daily_rejects_bad_date(daily_config_file):
-    """An unparseable --date exits non-zero with a helpful message."""
-    runner = CliRunner()
-    with patch("obsidian_rag.cli.run_format_daily") as mock_run:
-        result = runner.invoke(
-            cli,
-            ["format-daily", "--config", str(daily_config_file), "--date", "junk"],
-        )
-
-    assert result.exit_code != 0
-    assert "YYYY-MM-DD" in result.output
-    mock_run.assert_not_called()
+    assert mock_run.call_args.kwargs["dry_run"] is True
 
 
 def test_format_daily_disabled_config_exits_with_message(config_file):

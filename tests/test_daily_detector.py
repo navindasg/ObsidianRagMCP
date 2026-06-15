@@ -42,9 +42,6 @@ def _find(vault: Path, **overrides) -> list[Path]:
     kwargs = {
         "daily_folder": "",
         "filename_format": "%Y-%m-%d",
-        "today": TODAY,
-        "start_date": START,
-        "catchup_days": 14,
         "excluded_dirs": [".obsidian", ".trash"],
         "excluded_patterns": [],
         **overrides,
@@ -169,106 +166,122 @@ def test_non_marker_text_not_formatted(tail):
 
 
 # ---------------------------------------------------------------------------
-# find_candidates — boundary dates
+# find_candidates — successor rule (eligible iff a later-dated note exists)
 # ---------------------------------------------------------------------------
 
 
-def test_yesterday_is_eligible(tmp_path):
-    """A note dated yesterday is a candidate."""
-    note = _make_note(tmp_path, "2026-06-11.md")
-    assert _find(tmp_path) == [note]
+def test_older_note_eligible_when_a_later_note_exists(tmp_path):
+    """A note becomes a candidate once any later-dated daily note exists."""
+    older = _make_note(tmp_path, "2026-06-11.md")
+    _make_note(tmp_path, "2026-06-12.md")  # the successor (held back itself)
+    assert _find(tmp_path) == [older]
 
 
-def test_today_is_never_eligible(tmp_path):
-    """Today's note is never a candidate (next-day rule)."""
+def test_single_note_is_held_back(tmp_path):
+    """The only daily note has no successor, so it is never eligible."""
     _make_note(tmp_path, "2026-06-12.md")
     assert _find(tmp_path) == []
 
 
-def test_future_note_is_not_eligible(tmp_path):
-    """A future-dated note is not a candidate."""
-    _make_note(tmp_path, "2026-06-13.md")
+def test_no_notes_returns_empty(tmp_path):
+    """An empty daily folder yields no candidates."""
     assert _find(tmp_path) == []
 
 
-def test_start_date_itself_eligible_once_past(tmp_path):
-    """A note dated exactly start_date is eligible once that date is past."""
-    note = _make_note(tmp_path, "2026-06-01.md")
-    assert _find(tmp_path) == [note]
+def test_latest_note_always_held_rest_eligible(tmp_path):
+    """Every note except the single most recent is eligible."""
+    n09 = _make_note(tmp_path, "2026-06-09.md")
+    n11 = _make_note(tmp_path, "2026-06-11.md")
+    _make_note(tmp_path, "2026-06-12.md")  # most recent -> held
+    assert _find(tmp_path) == [n09, n11]
 
 
-def test_note_before_start_date_not_eligible(tmp_path):
-    """A note dated before start_date is never a candidate (no backfill)."""
-    _make_note(tmp_path, "2026-05-31.md")
-    assert _find(tmp_path) == []
+def test_eligibility_ignores_calendar_age(tmp_path):
+    """A very old note is picked up the moment any later note exists."""
+    ancient = _make_note(tmp_path, "1900-01-01.md")
+    _make_note(tmp_path, "2026-06-12.md")
+    assert _find(tmp_path) == [ancient]
 
 
-# ---------------------------------------------------------------------------
-# find_candidates — catch-up window
-# ---------------------------------------------------------------------------
-
-
-def test_catchup_window_inclusive_lower_bound(tmp_path):
-    """A note dated exactly today - catchup_days is still eligible."""
-    note = _make_note(tmp_path, "2026-06-05.md")
-    result = _find(tmp_path, start_date=datetime.date(2026, 1, 1), catchup_days=7)
-    assert result == [note]
-
-
-def test_note_older_than_catchup_window_skipped(tmp_path):
-    """A note older than the catch-up window is skipped."""
-    _make_note(tmp_path, "2026-06-04.md")
-    result = _find(tmp_path, start_date=datetime.date(2026, 1, 1), catchup_days=7)
-    assert result == []
+def test_results_sorted_by_date_ascending(tmp_path):
+    """Candidates are returned ordered by note date, oldest first."""
+    n10 = _make_note(tmp_path, "2026-06-10.md")
+    n08 = _make_note(tmp_path, "2026-06-08.md")
+    n11 = _make_note(tmp_path, "2026-06-11.md")
+    _make_note(tmp_path, "2026-06-12.md")  # latest -> held
+    assert _find(tmp_path) == [n08, n10, n11]
 
 
 # ---------------------------------------------------------------------------
-# find_candidates — already formatted, non-date names, exclusions
+# find_candidates — since override (manual backfill, lifts the latest hold)
 # ---------------------------------------------------------------------------
 
 
-def test_formatted_via_frontmatter_skipped(tmp_path):
-    """A note with a 'formatted' frontmatter key is skipped."""
+def test_since_includes_the_most_recent_note(tmp_path):
+    """--since lifts the latest-note hold and floors by date."""
+    n11 = _make_note(tmp_path, "2026-06-11.md")
+    n12 = _make_note(tmp_path, "2026-06-12.md")
+    result = _find(tmp_path, since=datetime.date(2026, 6, 11))
+    assert result == [n11, n12]
+
+
+def test_since_excludes_notes_before_the_floor(tmp_path):
+    """Notes dated before --since are not picked up."""
+    _make_note(tmp_path, "2026-06-10.md")
+    keep = _make_note(tmp_path, "2026-06-12.md")
+    result = _find(tmp_path, since=datetime.date(2026, 6, 12))
+    assert result == [keep]
+
+
+def test_since_formats_a_lone_note(tmp_path):
+    """A single note, normally held, is eligible under --since."""
+    note = _make_note(tmp_path, "2026-06-12.md")
+    assert _find(tmp_path, since=datetime.date(2026, 6, 1)) == [note]
+
+
+# ---------------------------------------------------------------------------
+# find_candidates — already-formatted, non-date names, exclusions
+# ---------------------------------------------------------------------------
+
+
+def test_already_formatted_note_skipped(tmp_path):
+    """A note carrying the formatted marker is skipped even with a successor."""
     _make_note(tmp_path, "2026-06-10.md", "---\nformatted: true\n---\nbody\n")
-    assert _find(tmp_path) == []
-
-
-def test_formatted_via_original_notes_marker_skipped(tmp_path):
-    """Mangled formatter output (formatted: line + heading) is skipped."""
-    text = "---\nformatted: [unclosed\n---\nbody\n\n## Original Notes\nraw\n"
-    _make_note(tmp_path, "2026-06-10.md", text)
-    assert _find(tmp_path) == []
+    keep = _make_note(tmp_path, "2026-06-11.md")
+    _make_note(tmp_path, "2026-06-12.md")  # latest -> held
+    assert _find(tmp_path) == [keep]
 
 
 def test_raw_note_with_original_notes_heading_is_candidate(tmp_path):
     """A raw note with a user-authored '## Original Notes' section is eligible."""
     note = _make_note(tmp_path, "2026-06-10.md", "body\n\n## Original Notes\nraw\n")
+    _make_note(tmp_path, "2026-06-12.md")  # successor
     assert _find(tmp_path) == [note]
 
 
 def test_non_date_filenames_ignored(tmp_path):
-    """Files whose stems are not dates are ignored."""
+    """Files whose stems are not dates never count, even as a successor."""
     _make_note(tmp_path, "shopping list.md")
     _make_note(tmp_path, "2026-06-11 standup.md")
+    _make_note(tmp_path, "2026-06-11.md")  # only one real daily -> held
     assert _find(tmp_path) == []
 
 
 def test_excluded_patterns_respected(tmp_path):
-    """A date-named note matching an excluded glob pattern is skipped."""
+    """A date-named note matching an excluded glob is skipped."""
     _make_note(tmp_path, "2026-06-10.md")
-    keep = _make_note(tmp_path, "2026-06-11.md")
+    _make_note(tmp_path, "2026-06-11.md")
+    _make_note(tmp_path, "2026-06-12.md")  # latest -> held
     result = _find(tmp_path, excluded_patterns=["*-06-10.md"])
-    assert result == [keep]
+    # 06-10 excluded; 06-11 eligible; 06-12 held.
+    assert result == [tmp_path / "2026-06-11.md"]
 
 
 def test_excluded_dirs_respected(tmp_path):
     """A daily folder under an excluded directory yields no candidates."""
     _make_note(tmp_path / "archive" / "daily", "2026-06-11.md")
-    result = _find(
-        tmp_path,
-        daily_folder="archive/daily",
-        excluded_dirs=["archive"],
-    )
+    _make_note(tmp_path / "archive" / "daily", "2026-06-12.md")
+    result = _find(tmp_path, daily_folder="archive/daily", excluded_dirs=["archive"])
     assert result == []
 
 
@@ -280,19 +293,22 @@ def test_excluded_dirs_respected(tmp_path):
 def test_empty_daily_folder_means_vault_root(tmp_path):
     """daily_folder='' scans the vault root itself."""
     note = _make_note(tmp_path, "2026-06-11.md")
+    _make_note(tmp_path, "2026-06-12.md")  # successor
     assert _find(tmp_path, daily_folder="") == [note]
 
 
 def test_scan_is_non_recursive(tmp_path):
     """Notes in subdirectories of the daily folder are not scanned."""
     _make_note(tmp_path / "sub", "2026-06-11.md")
+    _make_note(tmp_path / "sub", "2026-06-12.md")
     assert _find(tmp_path) == []
 
 
 def test_daily_folder_scoped_to_subdir(tmp_path):
     """With a named daily folder, only that folder is scanned."""
     inside = _make_note(tmp_path / "Daily", "2026-06-11.md")
-    _make_note(tmp_path, "2026-06-10.md")
+    _make_note(tmp_path / "Daily", "2026-06-12.md")  # successor inside folder
+    _make_note(tmp_path, "2026-06-10.md")  # root, ignored
     assert _find(tmp_path, daily_folder="Daily") == [inside]
 
 
@@ -302,7 +318,7 @@ def test_missing_daily_folder_returns_empty(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# find_candidates — unreadable files and ordering
+# find_candidates — unreadable files
 # ---------------------------------------------------------------------------
 
 
@@ -311,20 +327,13 @@ def test_unreadable_file_skipped_with_warning(tmp_path, caplog):
     bad = tmp_path / "2026-06-09.md"
     bad.write_bytes(b"\xff\xfe invalid \xff utf8")
     good = _make_note(tmp_path, "2026-06-10.md")
+    _make_note(tmp_path, "2026-06-12.md")  # latest -> held
 
     with caplog.at_level(logging.WARNING, logger="obsidian_rag.daily_format.detector"):
         result = _find(tmp_path)
 
     assert result == [good]
     assert any("2026-06-09" in record.message for record in caplog.records)
-
-
-def test_results_sorted_by_date_ascending(tmp_path):
-    """Candidates are returned ordered by note date, oldest first."""
-    n10 = _make_note(tmp_path, "2026-06-10.md")
-    n08 = _make_note(tmp_path, "2026-06-08.md")
-    n11 = _make_note(tmp_path, "2026-06-11.md")
-    assert _find(tmp_path) == [n08, n10, n11]
 
 
 # ---------------------------------------------------------------------------
@@ -352,5 +361,14 @@ def test_find_candidates_skips_blacklisted_note(tmp_path):
     """A blacklisted daily note is never a candidate; siblings still are."""
     _make_note(tmp_path, "2026-06-10.md")
     kept = _make_note(tmp_path, "2026-06-11.md")
+    _make_note(tmp_path, "2026-06-12.md")  # latest -> held
 
     assert _find(tmp_path, blacklist=["2026-06-10"]) == [kept]
+
+
+def test_blacklisted_note_does_not_count_as_successor(tmp_path):
+    """A blacklisted latest note cannot 'unlock' an older note."""
+    _make_note(tmp_path, "2026-06-11.md")
+    _make_note(tmp_path, "2026-06-12.md")  # blacklisted -> removed from the set
+    # With 06-12 blacklisted, 06-11 is the lone remaining note -> held.
+    assert _find(tmp_path, blacklist=["2026-06-12"]) == []

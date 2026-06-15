@@ -178,8 +178,6 @@ daily_format:
   model: null                    # Ollama chat model (null = auto-select from pulled models)
   schedule_hour: 0               # Hour of the nightly launchd run (0–23)
   schedule_minute: 30            # Minute of the nightly launchd run (0–59)
-  start_date: null               # No-backfill cutoff (null = recorded on first run)
-  catchup_days: 14               # Max age in days of notes picked up after downtime
   max_retries: 3                 # Attempts per note before it is parked in the queue
   blacklist: []                  # Notes never formatted (stems or relative paths, .md optional)
   format_tag: "#!format"         # Marker that opts any note in to the next run (null disables)
@@ -260,30 +258,28 @@ An optional nightly job that cleans up raw Obsidian daily notes (files whose ste
 
 The `formatted` frontmatter key marks a note as done, so a note is never formatted twice. Disabled by default — set `daily_format.enabled: true` to use it.
 
-### Eligibility and the no-backfill rule
+### Eligibility: the successor rule
 
-- **Next-day rule:** a note is only formatted once its date is in the past. Today's note is never touched; yesterday's note is picked up by tonight's run.
-- **No backfill:** only notes dated on or after `start_date` are eligible. When `start_date` is `null` (the default), the first run records its own date into the queue file — so daily notes that existed before you enabled the feature are never reformatted. Set `start_date` explicitly in the config to override.
-- **Catch-up window:** after downtime, at most the last `catchup_days` days of notes are picked up.
-- **Blacklist:** notes listed in `daily_format.blacklist` are never formatted, even when tagged. Entries match a filename stem (`2026-06-10`) or a vault-relative path (`drafts/letter`), with the `.md` suffix optional.
+- **A daily note is formatted once a later-dated daily note exists.** The single most recent daily note is always held back — it may still be in progress — and every older note is eligible. Calendar time is irrelevant: a note from months or years ago is picked up the moment any later-dated note appears. So your Friday note formats as soon as a Saturday (or any later) daily note exists, however long that takes.
+- **No surprises from age:** there is no catch-up window and no start-date cutoff. The `formatted` frontmatter key marks a note as done, so already-formatted notes are skipped and never reprocessed.
+- **Blacklist:** notes listed in `daily_format.blacklist` are never formatted, even when tagged, and never count as a successor. Entries match a filename stem (`2026-06-10`) or a vault-relative path (`drafts/letter`), with the `.md` suffix optional.
 
 ### Formatting any note on demand: the format tag
 
-Type the `format_tag` marker (default `#!format`) anywhere in a note — daily or not — and the next run picks it up. The marker is stripped from the note as soon as it is queued, so the request survives even if Ollama is down at the time. Tagged notes skip the next-day and no-backfill rules (the tag is the opt-in) and are formatted with the same structure, minus the `date` frontmatter key. Two exceptions: tagging an already-formatted note only consumes the marker (it is never double-wrapped), and tagging a daily note only consumes the marker too — dailies stay on their next-day schedule. The model is also told these notes can hold mixed content (LLM prompts, logins, message drafts) and labels such sections with contextual headings like `## Draft: …` while preserving credentials, prompt text, code, URLs, and draft wording verbatim.
+Type the `format_tag` marker (default `#!format`) anywhere in a note — daily or not — and the next run picks it up. The marker is stripped from the note as soon as it is queued, so the request survives even if Ollama is down at the time. Tagged notes skip the successor rule (the tag is the opt-in) and are formatted with the same structure, minus the `date` frontmatter key. Two exceptions: tagging an already-formatted note only consumes the marker (it is never double-wrapped), and tagging a daily note only consumes the marker too — dailies stay on the successor schedule. The model is also told these notes can hold mixed content (LLM prompts, logins, message drafts) and labels such sections with contextual headings like `## Draft: …` while preserving credentials, prompt text, code, URLs, and draft wording verbatim.
 
 ### Running it
 
 ```bash
 obsidian-rag format-daily              # one formatting pass now
 obsidian-rag format-daily --dry-run    # enqueue and report; never calls Ollama or rewrites notes
-obsidian-rag format-daily --date 2026-06-12   # override "today" (for testing)
-obsidian-rag format-daily --since 2026-03-19  # deliberate backfill from a date
+obsidian-rag format-daily --since 2026-03-19  # backfill from a date, including the most recent note
 obsidian-rag format-daily --tags-only  # only pick up format-tagged notes (used by the poll agent)
 ```
 
 `format-daily` exits non-zero if any note failed to format. Failed notes stay in the queue and are retried on the next run, up to `max_retries` attempts each, after which they are parked.
 
-`--since` is the deliberate backfill escape hatch: it overrides `start_date` and the catch-up window so every daily note from that date on becomes eligible. The blacklist and next-day rule still apply.
+`--since` is the manual backfill escape hatch: it formats every daily note dated on or after the given date, **including the most recent one** (lifting the latest-note hold). The blacklist still applies. Use it to format a note that would otherwise sit as the newest note with no successor yet.
 
 ### Scheduling (macOS launchd)
 
@@ -300,7 +296,7 @@ obsidian-rag schedule uninstall    # remove both agents
 
 ### The persistent queue
 
-Work is tracked in a JSON queue at `~/.obsidian-rag/format_queue.json`, which also stores the recorded `start_date`. The queue survives sleep, crashes, and failures: if Ollama is unreachable, everything stays queued for the next run, and one note's failure never aborts the rest of the run.
+Work is tracked in a JSON queue at `~/.obsidian-rag/format_queue.json`. The queue survives sleep, crashes, and failures: if Ollama is unreachable, everything stays queued for the next run, and one note's failure never aborts the rest of the run.
 
 ### Battery gate
 
@@ -344,8 +340,7 @@ obsidian-rag format-daily [OPTIONS]
 
   --config PATH       Path to config file (default: ~/.obsidian-rag/config.yaml)
   --dry-run           Enqueue and report, but do not call Ollama or rewrite notes
-  --date YYYY-MM-DD   Override today's date (for testing)
-  --since YYYY-MM-DD  Backfill daily notes from this date, ignoring start_date/catch-up
+  --since YYYY-MM-DD  Backfill from this date, including the most recent note
   --tags-only         Only pick up format-tagged notes (used by the poll agent)
 
 obsidian-rag schedule install   [--config PATH]   Install (or reinstall) both LaunchAgents
